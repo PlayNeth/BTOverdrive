@@ -49,7 +49,7 @@
 #include <cmath>
 #include <mmsystem.h>
 
-#define HWBT_VERSION "0.3.1"
+#define HWBT_VERSION "0.4.0"
 #define HWBT_BASE "HWBTFix 0.3.8"
 
 // ---------------------------------------------------------------------------
@@ -119,6 +119,43 @@ namespace hot {
     // speed field of view (see "Speed FOV")
     const DWORD callCamFov     = 0x5BA4ED;   // call 0x53C980 in Camera::Apply: set the field of view (cdecl, degrees)
     const DWORD fnSetFov       = 0x53C980;
+    const DWORD worldFrozen    = 0x960B24;
+    const DWORD frameDt        = 0x960B14;   // float: this step's time (set by 0x5A2330; the Flash UI's clock)   // byte: 1 = the world is frozen (pause menu, countdown; set by 0x5A2420)
+    // hazard hits (see "Hazard hits")
+    const DWORD contactFilter  = 0x489090;   // collision: delete a contact? (cdecl, contact*): true = delete it
+    const DWORD contactNoIds   = 0x95A464;   //   int[2]: material ids whose contacts are always deleted (-1 = none)
+    const DWORD contactDelMsg  = 0x8A89C0;   //   "Deleted contact between material IDs %i, %i\n"
+    const DWORD fnCarReset     = 0x433F90;   // GSResetOnTrackAP_c: put car +0x60 on the track at matrix +0x10 (thiscall)
+    const DWORD fnCarDustBall  = 0x453A20;   // race car: a "DustBall" smoke burst on it (thiscall; the hazards' own hit effect)
+    const DWORD fnKinPose      = 0x5F2070;   // box pose from its part (thiscall, box; float out[16]): part matrix x mesh matrix
+    const DWORD callKinPose[2] = { 0x4E668E, 0x4E68FB };   //   its calls: each step (0x4E6630) and at setup (0x4E67F0)
+    // starting grid (see "Starting grid")
+    const DWORD callGridPlace  = 0x47BF43;   // call 0x63E750 in GSWorldInitState_c: put racer on its grid action point
+    const DWORD callGridReset  = 0x47D146;   //   the same in GSWorldResetState_c (race restart)
+    const DWORD fnPlaceCar     = 0x63E750;   // car: put on the ground at pos facing mat row 2 (thiscall; pos*, mat*, int, float, int)
+    const DWORD apUserList     = 0x9680C0;   // ActionPoint* list (count at +4): searched first (0x60F6F0)
+    const DWORD apList         = 0x96821C;   // ActionPoint* list (count at +4): then this one (0x60E0A0)
+    // start boost (see "Start boost")
+    const DWORD vt321Update    = 0x8AF4DC;   // GSSingle321_c vtable slot 1: its update, 0x4E8500 (thiscall, no arguments)
+    const DWORD fn321Update    = 0x4E8500;
+    const DWORD fnAnimPastMark = 0x5C0DC0;   // FlashDialog: past a marker? (thiscall, const char* name) -> bool
+    const DWORD strIntroEnd    = 0x8A3A98;   // "intro_end"
+    // AI opponents (see "AI opponents")
+    const DWORD callIntroGo    = 0x483960;   // call 0x479E30 in GSRaceIntroState_c (vtable +0xBC): GO - start boosts, cars released
+    const DWORD fnIntroGo      = 0x479E30;   //   (thiscall, intro state): each car's start boost if the player hit the green
+    const DWORD fnCarStartBoost = 0x4545B0;  // race car: the start boost (a boost, fired on it; thiscall, no arguments)
+    const DWORD catchupAhead   = 0x66845D;   // jp 0x66847B in CatchUp::Update: an AI ahead of the player -> slowed down
+    const DWORD aiFireCooldown = 0x430B65;   // fld [esi+0xAF4] (5.0 s x AI gunners): the wait between any two AI shots
+    const DWORD aiTargetChance = 0x46D2F2;   // fadd [0x89EFF0] (40.0): % chance (+10 per difficulty) an AI shot goes for the player
+    const DWORD aiAreaLimit    = 0x43097E;   // imm8 2 in cmp [0x95910C], 2: area weapons held while this many are out
+    const DWORD callKinStep    = 0x474CD2;   // call 0x4E6630: move a box set's boxes with their parts (once per step)
+    const DWORD fnKinStep      = 0x4E6630;   //   (thiscall, box set)
+    const DWORD callKinSetup   = 0x474AEA;   // call 0x4E69D0: collision boxes for a trigger's animated model
+    const DWORD fnKinSetup     = 0x4E69D0;   //   (thiscall, box set; model, ?, detect-only flag)
+    const DWORD callKinCreate  = 0x4E69B2;   // call 0x5F2260: make a box's PhysX actor (thiscall, box; no arguments)
+    const DWORD fnKinCreate    = 0x5F2260;   //   (uses the box's full size as the NxBox's half-size: twice too big)
+    const DWORD fnSetLinVel    = 0x5F9910;   // vehicle: set linear velocity (thiscall, const float[3])
+    const DWORD fnSetAngVel    = 0x5F9970;   // vehicle: set angular velocity (thiscall, const float[3])
     struct Sig { DWORD addr; const char* bytes; int len; };
     const Sig kSigs[] = {
         { callDocsFolder, "\xFF\x15\x20\x74\x97\x00", 6 },
@@ -144,6 +181,7 @@ namespace hot {
                           "\xB9\x07\x00\x00\x00\x33\xD2\xF3\xA6\x74\x05\x83\xC3\x01\xEB\x8B", 36 },
         { setWorld,       "\x83\xEC\x40\x8B\x44\x24\x44", 7 },       // sub esp,0x40 / mov eax,[esp+0x44]
         { getXform,       "\x8D\x41\x10\xC3\xCC", 5 },               // lea eax,[ecx+0x10] / ret / int3
+        { 0x5A2420,       "\xB0\x01\xA2\x24\x0B\x96\x00", 7 },     // mov al,1 / mov [0x960B24],al
         { callCamFov,     "\xE8\x8E\x24\xF8\xFF", 5 },               // call 0x53C980
         { scrReadFloat,   "\x51\xE8\xDA\xF8\xFF\xFF\x8B\x89\x14\x02\x00\x00", 12 },   // push ecx / call NextToken / mov ecx,[ecx+0x214]
         { scrReadInt,     "\xE8\xBB\xF8\xFF\xFF\x8B\x44\x24\x04", 9 },               // call NextToken / mov eax,[esp+4]
@@ -164,6 +202,32 @@ namespace hot {
         { effRow0,        "\x8B\x41\x14\x81\xEC\x80\x00\x00\x00", 9 },
         { effRows,        "\x81\xEC\x80\x00\x00\x00", 6 },
         { garageLift,     "\xD9\x85\x7C\x09\x00\x00", 6 },       // fld dword ptr [ebp+0x97C]
+        { contactFilter,  "\x56\x8B\x74\x24\x08\x57\x8B\x7E\x30", 9 },   // push esi / mov esi,[esp+8] / push edi / mov edi,[esi+0x30]
+        { callKinStep,    "\xE8\x59\x19\x07\x00", 5 },               // call 0x4E6630
+        { callGridPlace,  "\xE8\x08\x28\x1C\x00", 5 },               // call 0x63E750
+        { callGridReset,  "\xE8\x05\x16\x1C\x00", 5 },               // call 0x63E750
+        { vt321Update,    "\x00\x85\x4E\x00", 4 },                   // dd 0x4E8500
+        { fn321Update,    "\x53\x55\x56\x8B\xF1\x83\x7E\x30", 8 },   // push ebx/ebp/esi / mov esi,ecx / cmp [esi+0x30],..
+        { fnAnimPastMark, "\x83\xEC\x08\x8B\x44\x24\x0C", 7 },   // sub esp,8 / mov eax,[esp+0xC]
+        { strIntroEnd,    "intro_end", 10 },
+        { callIntroGo,    "\xE8\xCB\x64\xFF\xFF", 5 },               // call 0x479E30
+        { fnCarStartBoost, "\x56\x8B\xF1\x68\xA3\x0F\x00\x00", 8 },  // push esi / mov esi,ecx / push 0xFA3 (boost)
+        { catchupAhead,   "\x7A\x1C", 2 },                           // jp +0x1C
+        { aiFireCooldown, "\xD9\x86\xF4\x0A\x00\x00", 6 },           // fld dword ptr [esi+0xAF4]
+        { aiTargetChance, "\xDC\x05\xF0\xEF\x89\x00", 6 },           // fadd qword ptr [0x89EFF0]
+        { 0x430978,       "\x83\x3D\x0C\x91\x95\x00\x02", 7 },     // cmp dword ptr [0x95910C], 2
+        { fnPlaceCar,     "\x81\xEC\xF8\x00\x00\x00", 6 },           // sub esp, 0xF8
+        { 0x4E668E,       "\xE8\xDD\xB9\x10\x00", 5 },               // call 0x5F2070 (x2)
+        { 0x4E68FB,       "\xE8\x70\xB7\x10\x00", 5 },
+        { fnKinPose,      "\x8B\x41\x6C\x8B\x88\x74\x01\x00\x00", 9 },   // mov eax,[ecx+0x6C] / mov ecx,[eax+0x174]
+        { fnCarDustBall,  "\x53\x57\x8B\xF9\x8B\x87\xA4\x0D\x00\x00", 10 },   // push ebx / push edi / mov edi,ecx / mov eax,[edi+0xDA4]
+        { fnCarReset,     "\x64\xA1\x00\x00\x00\x00\x6A\xFF", 8 },   // mov eax,fs:[0] / push -1
+        { fnKinStep,      "\x83\xEC\x68\xD9\x05\x14\x0B\x96\x00", 9 },   // sub esp,0x68 / fld [0x960B14]
+        { callKinSetup,   "\xE8\xE1\x1E\x07\x00", 5 },               // call 0x4E69D0
+        { fnKinSetup,     "\x56\x8B\xF1\x8B\x4C\x24", 6 },           // push esi / mov esi,ecx / mov ecx,[esp+..]
+        { callKinCreate,  "\xE8\xA9\xB8\x10\x00", 5 },               // call 0x5F2260
+        { fnSetLinVel,    "\x8B\x44\x24\x04\x56\x57\x8B\xF9", 8 },   // mov eax,[esp+4] / push esi / push edi / mov edi,ecx
+        { fnSetAngVel,    "\x8B\x54\x24\x04\x56\x8B\x32", 7 },       // mov edx,[esp+4] / push esi / mov esi,[edx]
     };
 }
 
@@ -189,6 +253,28 @@ struct Config {
     float speedFov = 12.0f;              // degrees added to the camera's field of view at speed (0 = off)
     float speedFovMin = 11.0f;           // speed (units/s) where it starts (11 ~ 25 mph)
     float speedFovMax = 45.0f;           // speed where it's full (45 ~ 100 mph)
+    int   hazardHits = 1;                // moving track hazards (the graveyard ghoul's hands) throw cars
+    float hazardMinSpeed = 50.0f;        // a part must move at least this fast (units/s) to hit
+    float hazardReach = 3.0f;            // a part hits within this many times its size (takes in the long fingers, which have no box)
+    float hazardPush = 150.0f;           // the car is thrown this fast (units/s) sideways, away from the part
+    float hazardLift = 120.0f;           // plus this much upward (units/s)
+    float hazardSpin = 6.0f;             // and a tumble (radians/s)
+    float hazardFlyTime = 3.0f;          // a thrown car goes through walls for this long (seconds; 0 = never)
+    int   hazardSmoke = 1;               // a burst of smoke on a car the hazard throws
+    float hazardFallReset = 25.0f;       // a thrown car this far below where it was hit is put back on the track (0 = never)
+    float hazardPushTime = 0.5f;         // the throw keeps pushing for this long (seconds)
+    int   hazardGateFix = 1;             // the graveyard gate's panels get their collision where they are
+    int   aiLeadSlowdown = 0;            // AI cars ahead of the player are slowed down (the game's rubber-banding)
+    float aiWeaponCooldown = 2.5f;       // seconds between any two AI shots (game: 5)
+    float aiTargetPlayer = 60.0f;        // % of AI shots aimed at the player, +10 per difficulty (game: 40)
+    float aiStartBoost = 50.0f;          // % chance each AI car gets the start boost at GO (game: never)
+    int   aiAreaWeaponLimit = 4;         // area weapons the AI holds back while this many are out (game: 2)
+    float boostMeterSpeed = 1.6f;        // the start-boost dial runs this many times as fast (1 = original)
+    int   gridLayout = 1;                // start in a grid, as in the trailer (0 = the game's single file)
+    int   gridColumns = 4;               // cars side by side in a row
+    float gridWidth = 7.0f;              // between neighbouring cars in a row (units)
+    float gridRowGap = 14.0f;            // between rows (units)
+    float gridStagger = 3.5f;            // each car to the right this much further back: the row descends (units)
 };
 static Config g_cfg;
 static char g_asiDir[MAX_PATH] = {};     // trailing backslash
@@ -258,7 +344,55 @@ static const char kIniText[] =
     ";   from speedFovMin to speedFovMax (game units per second; 11 ~ 25 mph, 45 ~ 100 mph)\n"
     "speedFov=12\n"
     "speedFovMin=11\n"
-    "speedFovMax=45\n";
+    "speedFovMax=45\n"
+    "; --- hazards ---\n"
+    "; moving track hazards (the ghoul's hands on the graveyard track) throw cars off the track: a car\n"
+    ";   within hazardReach times a moving part's size, while the part moves faster than\n"
+    ";   hazardMinSpeed, is thrown hazardPush units/s sideways (away from the part) and hazardLift\n"
+    ";   upward, with a tumble of hazardSpin (radians/s); for scale, cars race at about 30-45 units/s.\n"
+    ";   Also fixes the hazards' collision boxes, which were twice their parts' size (invisible\n"
+    ";   walls). 0 = original\n"
+    "hazardHits=1\n"
+    "hazardMinSpeed=50\n"
+    "hazardReach=3\n"
+    "hazardPush=150\n"
+    "hazardLift=120\n"
+    "hazardSpin=6\n"
+    "; a thrown car flies through walls (the track's invisible walls too) for this many seconds,\n"
+    ";   so it can be thrown off the track (0 = it bounces off them)\n"
+    "hazardFlyTime=3\n"
+    "; a thrown car that falls this far (units) below where it was thrown is put back on the track,\n"
+    ";   the way the game resets a car that's stuck (0 = never)\n"
+    "hazardFallReset=25\n"
+    "; a burst of smoke on a car the hazard throws (1) or none (0)\n"
+    "hazardSmoke=1\n"
+    "; the throw keeps pushing for this many seconds (the car's grip takes sideways speed out fast)\n"
+    "hazardPushTime=0.5\n"
+    "; give the graveyard gate's panels their collision where they are (1) or as the game has it (0)\n"
+    "hazardGateFix=1\n"
+    "; --- starting grid ---\n"
+    "; start in a grid, as in the trailer (1), or in single file (0); gridColumns: cars side by\n"
+    ";   side; gridWidth: between them (units)\n"
+    "gridLayout=1\n"
+    "gridColumns=4\n"
+    "gridWidth=7\n"
+    "; gridRowGap: between rows; gridStagger: each car to the right this much further back (units)\n"
+    "gridRowGap=14\n"
+    "gridStagger=3.5\n"
+    "; the start-boost dial (hit the green during 3-2-1) runs this many times as fast: higher = harder\n"
+    ";   (1 = original; the countdown itself keeps its timing)\n"
+    "boostMeterSpeed=1.6\n"
+    "; --- AI opponents (game values in brackets) ---\n"
+    "; slow down AI cars that get ahead of you, the game's rubber-banding (1), or let them race (0)\n"
+    "aiLeadSlowdown=0\n"
+    "; seconds between any two AI weapon shots, across all AI cars [5]\n"
+    "aiWeaponCooldown=2.5\n"
+    "; % of AI shots aimed at you, +10 per difficulty level [40]; the rest go at the leaders\n"
+    "aiTargetPlayer=60\n"
+    "; the AI holds back area weapons (ice, EMP, airstrike, smoke...) while this many are out [2]\n"
+    "aiAreaWeaponLimit=4\n"
+    "; % chance each AI car gets the start boost at GO, as if it hit the green [never]\n"
+    "aiStartBoost=50\n";
 
 static void LoadConfig() {
     char path[MAX_PATH]; snprintf(path, sizeof(path), "%sHWBTMod.ini", g_asiDir);
@@ -299,6 +433,28 @@ static void LoadConfig() {
         else if (!_stricmp(key, "speedFov"))           g_cfg.speedFov = (float)atof(val);
         else if (!_stricmp(key, "speedFovMin"))        g_cfg.speedFovMin = (float)atof(val);
         else if (!_stricmp(key, "speedFovMax"))        g_cfg.speedFovMax = (float)atof(val);
+        else if (!_stricmp(key, "hazardHits"))         g_cfg.hazardHits = n;
+        else if (!_stricmp(key, "hazardMinSpeed"))     g_cfg.hazardMinSpeed = (float)atof(val);
+        else if (!_stricmp(key, "hazardReach"))        g_cfg.hazardReach = (float)atof(val);
+        else if (!_stricmp(key, "hazardPush"))         g_cfg.hazardPush = (float)atof(val);
+        else if (!_stricmp(key, "hazardLift"))         g_cfg.hazardLift = (float)atof(val);
+        else if (!_stricmp(key, "hazardSpin"))         g_cfg.hazardSpin = (float)atof(val);
+        else if (!_stricmp(key, "hazardFlyTime"))      g_cfg.hazardFlyTime = (float)atof(val);
+        else if (!_stricmp(key, "hazardSmoke"))        g_cfg.hazardSmoke = n;
+        else if (!_stricmp(key, "hazardPushTime"))     g_cfg.hazardPushTime = (float)atof(val);
+        else if (!_stricmp(key, "aiLeadSlowdown"))     g_cfg.aiLeadSlowdown = n;
+        else if (!_stricmp(key, "aiWeaponCooldown"))   g_cfg.aiWeaponCooldown = (float)atof(val);
+        else if (!_stricmp(key, "aiTargetPlayer"))     g_cfg.aiTargetPlayer = (float)atof(val);
+        else if (!_stricmp(key, "aiStartBoost"))       g_cfg.aiStartBoost = (float)atof(val);
+        else if (!_stricmp(key, "aiAreaWeaponLimit"))  g_cfg.aiAreaWeaponLimit = n;
+        else if (!_stricmp(key, "boostMeterSpeed"))    g_cfg.boostMeterSpeed = (float)atof(val);
+        else if (!_stricmp(key, "gridLayout"))         g_cfg.gridLayout = n;
+        else if (!_stricmp(key, "gridColumns"))        g_cfg.gridColumns = n;
+        else if (!_stricmp(key, "gridRowGap"))         g_cfg.gridRowGap = (float)atof(val);
+        else if (!_stricmp(key, "gridStagger"))        g_cfg.gridStagger = (float)atof(val);
+        else if (!_stricmp(key, "gridWidth"))          g_cfg.gridWidth = (float)atof(val);
+        else if (!_stricmp(key, "hazardGateFix"))      g_cfg.hazardGateFix = n;
+        else if (!_stricmp(key, "hazardFallReset"))    g_cfg.hazardFallReset = (float)atof(val);
     }
     fclose(f);
 }
@@ -635,8 +791,14 @@ static Track* FindTrack(BYTE* obj, int kind) {
     t->seenStep = t->seenFrame = t->snapStep = t->outFrame = t->trailStep = LONG_MIN / 2;
     return t;
 }
+static volatile LONG g_kicksPending = 0;              // hazard hits waiting for their car (see "Hazard hits")
+static bool g_hzOn = false;
+static void ApplyHazardKick(BYTE* car);
+static void NoteHazardCar(BYTE* car);
+static void HazardFallCheck(BYTE* car);
 extern "C" void __cdecl RegCar(BYTE* car) {          // per car, per step, at the start of its physics sync
     if (!car) return;
+    if (g_hzOn) { NoteHazardCar(car); if (g_kicksPending) ApplyHazardKick(car); HazardFallCheck(car); }
     if (!g_interpOn) return;
     if (Track* t = FindTrack(car, 1)) t->seenStep = g_stepsDone + 1;
 }
@@ -1320,7 +1482,11 @@ extern "C" void __cdecl HkSetFov(float fov) {
     float dt = c->qpc ? (float)(q.QuadPart - c->qpc) / (float)qpf : 0.0f;
     c->qpc = q.QuadPart;
     if (dt > 0.25f) dt = 0.25f;
-    c->speed += (speed - c->speed) * (1.0f - expf(-dt / 0.33f));   // ~1/3 s smoothing
+    // While the world is frozen (pause menu, countdown) the cars don't move or
+    // aren't tracked: the speed would ease to 0 and the view narrow under the
+    // pause menu. It's held as it was.
+    if (!*reinterpret_cast<volatile BYTE*>(hot::worldFrozen))
+        c->speed += (speed - c->speed) * (1.0f - expf(-dt / 0.33f));   // ~1/3 s smoothing
     if (c->speed > g_maxCamSpeed) g_maxCamSpeed = c->speed;
     float span = g_cfg.speedFovMax - g_cfg.speedFovMin;
     float x = span > 0.0f ? (c->speed - g_cfg.speedFovMin) / span : 0.0f;
@@ -1747,6 +1913,549 @@ static void InstallGameLog() {
 }
 
 // ---------------------------------------------------------------------------
+// Hazard hits. A track's animated hazards (the vampire's hands on the graveyard
+// track...) are trigger events whose model gets collision boxes, one per part,
+// that follow the parts every step (set up by 0x4E67F0, moved by 0x4E6630).
+// Two game bugs:
+//  - Each box's PhysX shape is made from the part's full size, but an NxBox
+//    takes half-sizes: every box was twice as big as its part in every direction
+//    (invisible walls around the slabs). The size is halved while the actor is
+//    made (0x5F2260).
+//  - The parts that reach furthest (the vampire's long fingers) get no box at all
+//    (size 0), and the boxes' speed is next to nothing, so a swipe can't throw a
+//    car: the hands only ever blocked or nudged.
+// So the mod gives moving hazards their own hit: each step it tracks every box's
+// position (its own speed from step to step), and a race car that's within the
+// box's reach - hazardReach times the part's size, which takes in the fingers -
+// while the part moves faster than hazardMinSpeed is thrown: sideways away from
+// the part and up, at most once per swipe, kept pushing for hazardPushTime. The
+// throw is applied at the car's physics sync (0x5FB260). A thrown car passes
+// through walls for hazardFlyTime, and one that falls off the track is put back.
+// ---------------------------------------------------------------------------
+static void TuningFlush();
+struct HazardKick {
+    BYTE* car; float dv[3]; float w[3]; volatile LONG pending; DWORD ms;
+    volatile DWORD flying;                      // when it was thrown (0: not flying)
+    float m0[16];                               // the car's matrix then: on the track, where it's put back
+    bool watch, reset;                          // watching it fall / a put-back is due
+    DWORD safe;                                 // when it was put back: no new hit for a while
+    float dir[2];                               // the throw's horizontal direction (x, z)
+};
+static HazardKick g_kicks[16];
+struct HazardCar { BYTE* car; DWORD ms; };                      // race cars seen at their physics sync
+static HazardCar g_hzCars[16];
+struct HazardBox { BYTE* box; float pos[3]; DWORD ms; float v[3]; float maxSpeed; LONG hits; };
+static HazardBox g_hzBoxes[64];
+static LONG g_hzKicks = 0, g_hzLogged = 0;
+typedef void (__attribute__((thiscall)) *SetVec_t)(BYTE*, const float*);
+static void ApplyHazardKick(BYTE* car) {
+    DWORD now = GetTickCount();
+    for (HazardKick& k : g_kicks) {
+        if (!k.pending) continue;
+        bool mine = k.car == car;
+        if (!mine && now - k.ms < 500) continue;                        // (a car that's gone: dropped)
+        if (InterlockedCompareExchange(&k.pending, 0, 1) != 1) continue;
+        InterlockedDecrement(&g_kicksPending);
+        if (!mine) continue;
+        const float* v = reinterpret_cast<const float*>(car + 0x260);
+        const float* w = reinterpret_cast<const float*>(car + 0x26C);
+        float nv[3] = { v[0] + k.dv[0], v[1] + k.dv[1], v[2] + k.dv[2] };
+        float nw[3] = { w[0] + k.w[0], w[1] + k.w[1], w[2] + k.w[2] };
+        reinterpret_cast<SetVec_t>(hot::fnSetLinVel)(car, nv);
+        reinterpret_cast<SetVec_t>(hot::fnSetAngVel)(car, nw);
+        bool airborne = k.watch && k.flying && now - k.flying < 8000;  // hit again in the air: keep where it was
+        if (!airborne) memcpy(k.m0, car + 0x10, sizeof(k.m0));         //   first hit (on the track) for the put-back
+        k.flying = now ? now : 1;
+        if (g_cfg.hazardSmoke)                                          // a burst of smoke on the swatted car
+            reinterpret_cast<void (__attribute__((thiscall)) *)(BYTE*)>(hot::fnCarDustBall)(car);
+        k.watch = g_cfg.hazardFallReset > 0.0f;
+        k.reset = false;
+    }
+}
+// A car thrown off the track falls forever (nothing below catches it, and the
+// game's reset of a stuck car finds no reset point from down there). So when a
+// thrown car falls hazardFallReset below where it was thrown, or is still
+// falling fast 3 seconds after the throw, it's put back where it was hit, with
+// the game's own put-back (GSResetOnTrackAP_c, 0x433F90: position, stops the
+// car, camera...). That runs with the hazards' step (HkKinStep), outside the
+// car's physics sync.
+static void HazardFallCheck(BYTE* car) {                        // from RegCar
+    DWORD now = GetTickCount();
+    for (HazardKick& k : g_kicks) {
+        if (k.car != car || !k.flying || k.reset) continue;
+        float y = reinterpret_cast<const float*>(car + 0x10)[13];
+        float vy = reinterpret_cast<const float*>(car + 0x260)[1];
+        // The car's own handling takes the sideways speed out within half a second
+        // (12 units/s left of 150, in the air too), so the throw keeps pushing for
+        // hazardPushTime: its speed along the throw is kept up to hazardPush.
+        if (now - k.flying < (DWORD)(g_cfg.hazardPushTime * 1000.0f)) {
+            const float* v = reinterpret_cast<const float*>(car + 0x260);
+            float along = v[0] * k.dir[0] + v[2] * k.dir[1];
+            if (along < g_cfg.hazardPush) {
+                float add = g_cfg.hazardPush - along;
+                float nv[3] = { v[0] + k.dir[0] * add, v[1], v[2] + k.dir[1] * add };
+                reinterpret_cast<SetVec_t>(hot::fnSetLinVel)(car, nv);
+            }
+        }
+        if (!k.watch) continue;
+        if (now - k.flying > 8000) { k.watch = false; continue; }      // landed on the track
+        float drop = g_cfg.hazardFallReset < 10.0f ? 10.0f : g_cfg.hazardFallReset;   // (never while it's still near the track)
+        if ((y < k.m0[13] - drop && vy < -10.0f) || (now - k.flying > 3000 && vy < -30.0f && y < k.m0[13] - 5.0f)) {
+            k.reset = true;
+            Logf("hazards: thrown car %p fell %.0f units (y %.1f -> %.1f, falling %.0f units/s): back on the track\n",
+                 car, k.m0[13] - y, k.m0[13], y, -vy);
+        }
+    }
+}
+alignas(16) static BYTE g_resetObj[0x88];                       // a GSResetOnTrackAP_c's fields for 0x433F90
+static void HazardResets() {                                    // from HkKinStep
+    for (HazardKick& k : g_kicks) {
+        if (!k.reset) continue;
+        k.reset = k.watch = false;
+        k.flying = 0;                                           // walls are walls again
+        k.safe = GetTickCount();
+        DWORD vt = *reinterpret_cast<DWORD*>(k.car);
+        if (vt != 0x8A0384 && vt != 0x8A0144 && vt != 0x8A3FA4) continue;   // (gone)
+        memset(g_resetObj, 0, sizeof(g_resetObj));
+        memcpy(g_resetObj + 0x10, k.m0, sizeof(k.m0));         // +0x10: matrix (position at +0x40)
+        *reinterpret_cast<BYTE**>(g_resetObj + 0x60) = k.car;  // +0x60: the car
+        reinterpret_cast<void (__attribute__((thiscall)) *)(BYTE*)>(hot::fnCarReset)(g_resetObj);
+    }
+}
+static void NoteHazardCar(BYTE* car) {                          // from RegCar, once per car per step
+    DWORD vt = *reinterpret_cast<DWORD*>(car);
+    if (vt != 0x8A0384 && vt != 0x8A0144 && vt != 0x8A3FA4) return;  // race cars only
+    DWORD now = GetTickCount();
+    HazardCar* slot = nullptr;
+    for (HazardCar& c : g_hzCars) {
+        if (c.car == car) { c.ms = now; return; }
+        if (!slot || now - c.ms > now - slot->ms) slot = &c;            // a free or the oldest slot
+    }
+    slot->car = car; slot->ms = now;
+}
+static void QueueKick(BYTE* car, const HazardBox& b, float sp) {
+    DWORD now = GetTickCount();
+    HazardKick* k = nullptr;
+    for (HazardKick& e : g_kicks) if (e.car == car) { k = &e; break; }
+    if (k && (k->pending || now - k->ms < 700 || (k->safe && now - k->safe < 2000))) return;   // one hit per swipe; none 2 s after a put-back
+    if (!k) {
+        for (HazardKick& e : g_kicks) if (!e.pending && !e.reset && (!k || now - e.ms > now - k->ms)) k = &e;   // the oldest free one
+        if (!k) return;
+    }
+    if (k->car != car) { k->safe = 0; k->flying = 0; k->watch = k->reset = false; }   // (another car's slot)
+    k->car = car; k->ms = now;
+    // The hands move 100-300 units/s at the box centre and often downwards (a slam):
+    // their velocity as it is would fire a car into the ground at 400 units/s. And
+    // a swipe along the track only sent the car down the track, into the walls'
+    // reach again. So the car goes out sideways (its own right or left, whichever
+    // the swipe leans to), with a set strength, and up.
+    const float* right = reinterpret_cast<const float*>(car + 0x10);   // the car's row 0: its right
+    float h[3] = { right[0], 0.0f, right[2] };
+    float hl = sqrtf(Dot3(h, h));
+    if (hl > 0.01f) for (int i = 0; i < 3; i++) h[i] /= hl;
+    else { h[0] = b.v[0]; h[2] = b.v[2]; hl = sqrtf(Dot3(h, h)); if (hl > 0.01f) { h[0] /= hl; h[2] /= hl; } }
+    // Away from the part (the vampire's hand comes from his side of the track: thrown
+    // towards him, the car hit his body and stayed on the track).
+    const float* cp = reinterpret_cast<const float*>(car + 0x10) + 12;
+    if (h[0] * (cp[0] - b.pos[0]) + h[2] * (cp[2] - b.pos[2]) < 0.0f) { h[0] = -h[0]; h[2] = -h[2]; }
+    k->dir[0] = h[0]; k->dir[1] = h[2];
+    k->dv[0] = h[0] * g_cfg.hazardPush;
+    k->dv[1] = g_cfg.hazardLift;
+    k->dv[2] = h[2] * g_cfg.hazardPush;
+    k->w[0] = h[2] * g_cfg.hazardSpin;                                  // tumble about the horizontal axis
+    k->w[1] = 0.0f;                                                     //   across the swipe
+    k->w[2] = -h[0] * g_cfg.hazardSpin;
+    InterlockedIncrement(&g_kicksPending);
+    InterlockedExchange(&k->pending, 1);
+    if (++g_hzKicks <= 30)
+        Logf("hazards: box %p (moving %.1f units/s) hit car %p%s: velocity +(%.1f %.1f %.1f)\n", b.box, sp, car,
+             *reinterpret_cast<DWORD*>(car) == 0x8A0384 ? " (you)" : "", k->dv[0], k->dv[1], k->dv[2]);
+}
+// A part's size (its mesh's, +0x88), or null.
+static const float* PartSize(BYTE* box) {
+    BYTE* obj = *reinterpret_cast<BYTE**>(box + 0x6C);
+    BYTE* x = obj ? *reinterpret_cast<BYTE**>(obj + 0x174) : nullptr;
+    BYTE* mesh = x ? *reinterpret_cast<BYTE**>(x + 0x10) : nullptr;
+    return mesh ? reinterpret_cast<const float*>(mesh + 0x88) : nullptr;
+}
+// A gate panel: thin (under 2 units) and upright (third axis vertical).
+static bool IsPanel(const float* size, const float* m) {
+    return size && size[0] > 0.01f && size[0] < 2.0f && fabsf(m[9]) > 0.95f;
+}
+// After the game moves a box set's boxes (once per step): their speed, and the hit test.
+static void HazardStep(BYTE* set) {                             // (after the game moved the boxes: +0x14 is current)
+    BYTE* boxes = *reinterpret_cast<BYTE**>(set + 0xC);
+    DWORD n = *reinterpret_cast<DWORD*>(set + 0x10);
+    DWORD now = GetTickCount();
+    float dt = *reinterpret_cast<const float*>(hot::stepDt);           // 1/60
+    for (DWORD i = 0; boxes && i < n; i++) {
+        BYTE* box = boxes + i * 0x7C;
+        if (!box[8] || !*reinterpret_cast<void**>(box)) continue;       // (as 0x4E6630: inactive or unused)
+        const float* m = reinterpret_cast<const float*>(box + 0x14);   // rows: axes; row 3: position
+        const float* lo = reinterpret_cast<const float*>(box + 0x54);
+        const float* hi = reinterpret_cast<const float*>(box + 0x60);
+        if (hi[0] - lo[0] < 0.01f) continue;                            // a part without a size
+        if (IsPanel(PartSize(box), m)) continue;                        // the gate: it blocks, it doesn't throw
+        HazardBox* b = nullptr; HazardBox* slot = nullptr;
+        for (HazardBox& e : g_hzBoxes) {
+            if (e.box == box) { b = &e; break; }
+            if (!slot || now - e.ms > now - slot->ms) slot = &e;
+        }
+        if (!b) { b = slot; memset(b, 0, sizeof(*b)); b->box = box; b->ms = now - 1000; }
+        bool fresh = now - b->ms < 100;                                 // last step's position is usable
+        for (int k = 0; k < 3; k++) {
+            b->v[k] = fresh ? (m[12 + k] - b->pos[k]) / dt : 0.0f;
+            b->pos[k] = m[12 + k];
+        }
+        b->ms = now;
+        float sp = sqrtf(Dot3(b->v, b->v));
+        if (sp > 1000.0f) { b->v[0] = b->v[1] = b->v[2] = 0.0f; continue; }   // a jump (a reset), not a swipe
+        if (sp > b->maxSpeed) b->maxSpeed = sp;
+        if (sp < g_cfg.hazardMinSpeed) continue;
+        for (const HazardCar& c : g_hzCars) {
+            if (!c.car || now - c.ms > 200) continue;
+            const float* cp = reinterpret_cast<const float*>(c.car + 0x10) + 12;
+            float d[3] = { cp[0] - m[12], cp[1] - m[13], cp[2] - m[14] };
+            bool in = true;
+            for (int a = 0; a < 3 && in; a++)                           // within reach on each of the box's axes
+                in = fabsf(Dot3(d, m + 4 * a)) <= hi[a] * g_cfg.hazardReach + 1.5f;   // (+ about half a car)
+            if (in) { b->hits++; QueueKick(c.car, *b, sp); }
+        }
+    }
+}
+// A thrown car flies through walls (the track's invisible walls keep it on the
+// track otherwise) for hazardFlyTime seconds: the collision code asks the contact
+// filter (0x489090) about each contact, and contacts of a flying car whose normal
+// is level (a wall, not the ground: |y| < 0.6) are deleted. The rest is 0x489090
+// as it was.
+static LONG g_hzWallsLogged = 0;
+typedef void (__cdecl *BoxHit_t)(BYTE* box, BYTE* car);
+extern "C" bool __cdecl HkContactFilter(BYTE* c) {
+    BYTE* car = *reinterpret_cast<BYTE**>(c + 0x30);
+    if (!car || *reinterpret_cast<DWORD*>(c + 0x34)) return false;
+    int idA = *reinterpret_cast<int*>(c + 0x28), idB = *reinterpret_cast<int*>(c + 0x2C);
+    const float* n = reinterpret_cast<const float*>(c + 0xC);          // the contact normal
+    if (g_cfg.hazardFlyTime > 0.0f && fabsf(n[1]) < 0.6f) {
+        DWORD now = GetTickCount();
+        for (HazardKick& k : g_kicks)
+            if (k.car == car && k.flying && now - k.flying < (DWORD)(g_cfg.hazardFlyTime * 1000.0f)) {
+                if (++g_hzWallsLogged <= 5)
+                    Logf("hazards: thrown car %p through a wall (materials %d, %d)\n", car, idA, idB);
+                return true;
+            }
+    }
+    const int* noIds = reinterpret_cast<const int*>(hot::contactNoIds);
+    bool noId = false;
+    for (int i = 0; i < 2 && !noId; i++) noId = noIds[i] != -1 && (idA == noIds[i] || idB == noIds[i]);
+    if (BYTE* box = *reinterpret_cast<BYTE**>(c + 0x38)) {
+        if (!noId) {
+            if (!box[0x10]) return false;                               // a solid box: a normal contact
+            if (BoxHit_t cb = *reinterpret_cast<BoxHit_t*>(box + 4)) cb(box, car);
+        }
+    } else if (!noId) return false;
+    reinterpret_cast<void (__cdecl *)(const char*, ...)>(hot::debugPrint)(
+        reinterpret_cast<const char*>(hot::contactDelMsg), idA, idB);
+    return true;
+}
+typedef void (__attribute__((thiscall)) *KinStep_t)(BYTE*);
+static void __attribute__((thiscall)) HkKinStep(BYTE* set) {
+    reinterpret_cast<KinStep_t>(hot::fnKinStep)(set);
+    HazardResets();
+    HazardStep(set);
+}
+// Gate panels (thin, upright parts: the graveyard's swinging gate) hang from a
+// hinge at a top corner: the part's origin is there, and the panel reaches out
+// along its second axis and down. The game centres each box on the origin, so
+// the gate's boxes floated above the track (no collision; at the old double
+// size, invisible walls around it). A panel's box is moved to the panel: half
+// its width out, half its height down. (Found from where cars touched the
+// double-size boxes.)
+// The bottom edges of the gate let cars through (the panels' lower boards reach
+// below their parts' size), so each panel's box also reaches kPanelSkirt lower.
+static const float kPanelSkirt = 8.0f;
+struct PanelSide { BYTE* box; float side; };
+static PanelSide g_panelSide[32];
+static int g_panelNext = 0;
+typedef float* (__attribute__((thiscall)) *KinPose_t)(BYTE*, float*);
+static float* __attribute__((thiscall)) HkKinPose(BYTE* box, float* out) {
+    float* m = reinterpret_cast<KinPose_t>(hot::fnKinPose)(box, out);
+    const float* size = PartSize(box);
+    if (g_cfg.hazardGateFix && IsPanel(size, m)) {
+        float side = 0.0f;                                      // (0 until the gate's set is set up)
+        for (const PanelSide& p : g_panelSide) if (p.box == box) { side = p.side; break; }
+        float out1 = size[1] * 0.5f * side, down = (size[2] * 0.5f + kPanelSkirt * 0.5f) * (m[9] > 0.0f ? 1.0f : -1.0f);
+        if (side != 0.0f)
+            for (int i = 0; i < 3; i++) m[12 + i] += m[4 + i] * out1 - m[8 + i] * down;
+    }
+    return m;
+}
+// Which way along its width each panel reaches from its hinge: towards the
+// middle of the gate (the panels of a gate hang from posts at its sides). Found
+// once the gate's boxes are set up, from the hinges' positions.
+static void SetPanelSides(BYTE* set) {
+    BYTE* boxes = *reinterpret_cast<BYTE**>(set + 0xC);
+    DWORD n = *reinterpret_cast<DWORD*>(set + 0x10);
+    float c[3] = { 0, 0, 0 }; int cn = 0;
+    static float raw[32][16];                                   // the hinges' own poses (0x5F2070 itself)
+    for (DWORD i = 0; boxes && i < n && i < 32; i++) {
+        BYTE* b = boxes + i * 0x7C; const float* m = raw[i];
+        raw[i][9] = 0.0f;                                       // (not upright: not a panel, unless set below)
+        const float* lo = reinterpret_cast<const float*>(b + 0x54);
+        if (reinterpret_cast<const float*>(b + 0x60)[0] - lo[0] < 0.01f) continue;   // an unused box (no part: no mesh data)
+        const float* sz = PartSize(b);
+        if (!sz || sz[0] < 0.01f) continue;
+        reinterpret_cast<KinPose_t>(hot::fnKinPose)(b, raw[i]);
+        if (!IsPanel(sz, m)) continue;
+        for (int k = 0; k < 3; k++) c[k] += m[12 + k];
+        cn++;
+    }
+    if (cn < 2) return;                                         // one panel: no middle to go by
+    for (int k = 0; k < 3; k++) c[k] /= cn;
+    for (DWORD i = 0; i < n && i < 32; i++) {
+        BYTE* b = boxes + i * 0x7C; const float* m = raw[i];
+        if (m[9] == 0.0f) continue;                             // (skipped above)
+        const float* sz = PartSize(b);
+        if (!sz || sz[0] < 0.01f || !IsPanel(sz, m)) continue;
+        float d[3] = { c[0] - m[12], c[1] - m[13], c[2] - m[14] };
+        float side = Dot3(d, m + 4) < 0.0f ? -1.0f : 1.0f;
+        PanelSide* slot = nullptr;
+        for (PanelSide& p : g_panelSide) if (p.box == b || (!slot && !p.box)) { slot = &p; if (p.box == b) break; }
+        if (!slot) slot = &g_panelSide[g_panelNext++ % 32];
+        slot->box = b; slot->side = side;
+        Logf("hazards: gate panel %p reaches %s along its width\n", b, side > 0.0f ? "+" : "-");
+    }
+}
+typedef void (__attribute__((thiscall)) *KinCreate_t)(BYTE*);
+static void __attribute__((thiscall)) HkKinCreate(BYTE* box) {  // the box's actor, at the part's real size
+    float* c = reinterpret_cast<float*>(box + 0x54);            // min x, y, z / max x, y, z
+    float saved[6];
+    memcpy(saved, c, sizeof(saved));
+    for (int i = 0; i < 6; i++) c[i] *= 0.5f;
+    // A gate panel is 0.8-1.3 thick and swings shut at 60 units/s, a unit a step:
+    // cars slipped through it. Its box is made 3 units thick.
+    if (g_cfg.hazardGateFix && IsPanel(PartSize(box), reinterpret_cast<const float*>(box + 0x14))) {
+        if (c[3] < 1.5f) { c[0] = -1.5f; c[3] = 1.5f; }
+        c[2] -= kPanelSkirt * 0.5f; c[5] += kPanelSkirt * 0.5f;    // (taller by kPanelSkirt; HkKinPose moves it down by half)
+    }
+    reinterpret_cast<KinCreate_t>(hot::fnKinCreate)(box);
+    memcpy(c, saved, sizeof(saved));
+}
+typedef void (__attribute__((thiscall)) *KinSetup_t)(BYTE*, void*, void*, DWORD);
+static void __attribute__((thiscall)) HkKinSetup(BYTE* set, void* model, void* a2, DWORD flag) {
+    reinterpret_cast<KinSetup_t>(hot::fnKinSetup)(set, model, a2, flag);
+    TuningFlush();                                              // (a track is loading: its numbers are in)
+    if (g_cfg.hazardGateFix) {                                  // (old entries for these boxes: a new track)
+        BYTE* bx = *reinterpret_cast<BYTE**>(set + 0xC); DWORD bn = *reinterpret_cast<DWORD*>(set + 0x10);
+        for (PanelSide& p : g_panelSide) if (p.box >= bx && p.box < bx + bn * 0x7C) p.box = nullptr;
+        SetPanelSides(set);
+    }
+    BYTE* boxes = *reinterpret_cast<BYTE**>(set + 0xC);
+    DWORD n = *reinterpret_cast<DWORD*>(set + 0x10);
+    if (++g_hzLogged > 40) return;
+    Logf("hazards: animated object %p: %lu part(s)%s\n", model, (unsigned long)n, (flag & 0xFF) ? ", pass-through" : "");
+    for (DWORD i = 0; boxes && i < n && i < 12; i++) {
+        const BYTE* b = boxes + i * 0x7C;
+        const float* p = reinterpret_cast<const float*>(b + 0x44);
+        const float* lo = reinterpret_cast<const float*>(b + 0x54);
+        const float* hi = reinterpret_cast<const float*>(b + 0x60);
+        if (hi[0] - lo[0] < 0.01f) Logf("  box %p: no size (no collision)\n", b);
+        else Logf("  box %p at (%.1f %.1f %.1f), size %.1f x %.1f x %.1f\n", b, p[0], p[1], p[2],
+                  hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]);
+    }
+}
+static void HazardReport() {                                    // at quitting: how fast each part moved
+    for (const HazardBox& b : g_hzBoxes)
+        if (b.box && b.maxSpeed > 0.5f)
+            Logf("hazards: box %p: fastest %.1f units/s, %ld hit(s)\n", b.box, b.maxSpeed, b.hits);
+}
+static void InstallHazards() {
+    if (!g_cfg.hazardHits) { Logf("hazards: original (hazardHits=0)\n"); return; }
+    if (!InstallCarSync() ||
+        !PatchCall(hot::callKinSetup, reinterpret_cast<void*>(&HkKinSetup), 5) ||
+        !PatchCall(hot::callKinCreate, reinterpret_cast<void*>(&HkKinCreate), 5) ||
+        !PatchCall(hot::callKinStep, reinterpret_cast<void*>(&HkKinStep), 5) ||
+        !PatchCall(hot::callKinPose[0], reinterpret_cast<void*>(&HkKinPose), 5) ||
+        !PatchCall(hot::callKinPose[1], reinterpret_cast<void*>(&HkKinPose), 5) ||
+        !PatchJmp(hot::contactFilter, reinterpret_cast<DWORD>(&HkContactFilter))) {
+        Logf("hazards: patch FAILED\n");
+        return;
+    }
+    g_hzOn = true;
+    Logf("hazards: on (min speed %.1f, reach x%.2f, push %.1f, lift %.1f, spin %.1f, fly time %.1f, fall reset %.1f, smoke %d)\n",
+         g_cfg.hazardMinSpeed, g_cfg.hazardReach, g_cfg.hazardPush, g_cfg.hazardLift, g_cfg.hazardSpin,
+         g_cfg.hazardFlyTime, g_cfg.hazardFallReset, g_cfg.hazardSmoke);
+}
+
+// ---------------------------------------------------------------------------
+// AI opponents. Their rubber-banding is CatchUp (per car, 0x6681A0; the script's
+// Catchup* values are loaded and never used): an AI more than 0/80/160 units
+// (by difficulty) ahead of the player has its target speed capped at 26.7 (31.1
+// level, 35.6 behind) and its grip and turning cut. aiLeadSlowdown=0 skips that
+// case (0x66845D: jp -> jmp), so a leading AI races at the level pace; the
+// boost when behind stays.
+// Weapons: every AI can get and fire every item, but after any AI shot all AIs
+// wait 5 s (gunner+0xAF4 x gunners, counted down by each: 5 s real time); only
+// 40/50/60% of shots go for the player (the rest at the leaders); and area
+// weapons (ice, EMP, airstrike, smoke, mortar 2, tesla 2) are held while 2 of
+// them are out. Each is set from the INI here.
+// ---------------------------------------------------------------------------
+// Start boost: at GO the game gives each car its start boost if the player hit
+// the green (0x479E30): the AI cars' version of it (vtable +0x204) is empty, so
+// they never had one. After it, each AI car gets the boost (0x4545B0, the
+// player's) with aiStartBoost percent chance.
+static DWORD g_rng = 0;
+static DWORD Rand32() {                                         // xorshift, seeded from the clock
+    if (!g_rng) { LARGE_INTEGER q; QueryPerformanceCounter(&q); g_rng = (DWORD)q.QuadPart | 1; }
+    g_rng ^= g_rng << 13; g_rng ^= g_rng >> 17; g_rng ^= g_rng << 5;
+    return g_rng;
+}
+typedef void (__attribute__((thiscall)) *ObjFn_t)(BYTE*);
+static void __attribute__((thiscall)) HkIntroGo(BYTE* state) {
+    reinterpret_cast<ObjFn_t>(hot::fnIntroGo)(state);
+    int boosted = 0, ai = 0;
+    for (int i = 0; i < 8; i++) {
+        BYTE* racer = reinterpret_cast<BYTE* const*>(0x953C90)[i];
+        BYTE* car = racer ? *reinterpret_cast<BYTE**>(racer + 0x10) : nullptr;
+        if (!car) continue;
+        DWORD vt = *reinterpret_cast<DWORD*>(car);
+        if (vt != 0x8A0144 && vt != 0x8A3FA4) continue;         // AI cars only
+        ai++;
+        if (Rand32() % 10000 < (DWORD)(g_cfg.aiStartBoost * 100.0f)) {
+            reinterpret_cast<ObjFn_t>(hot::fnCarStartBoost)(car);
+            boosted++;
+        }
+    }
+    Logf("AI: start boost for %d of %d AI car(s)\n", boosted, ai);
+}
+static float  g_aiCooldown = 5.0f;              // per AI gunner: x gunners, counted down by each = seconds
+static double g_aiTarget = 40.0;
+static void InstallAI() {
+    bool ok = true;
+    if (!g_cfg.aiLeadSlowdown) { BYTE j = 0xEB; ok = ok && PatchBytes(hot::catchupAhead, &j, 1); }
+    if (g_cfg.aiStartBoost > 0.0f) ok = ok && PatchCall(hot::callIntroGo, reinterpret_cast<void*>(&HkIntroGo), 5);
+    if (g_cfg.aiWeaponCooldown > 0.0f && g_cfg.aiWeaponCooldown != 5.0f) {
+        g_aiCooldown = g_cfg.aiWeaponCooldown;
+        BYTE b[6] = { 0xD9, 0x05 };                             // fld dword ptr [g_aiCooldown]
+        DWORD a = reinterpret_cast<DWORD>(&g_aiCooldown); memcpy(b + 2, &a, 4);
+        ok = ok && PatchBytes(hot::aiFireCooldown, b, 6);
+    }
+    if (g_cfg.aiTargetPlayer >= 0.0f && g_cfg.aiTargetPlayer != 40.0f) {
+        g_aiTarget = g_cfg.aiTargetPlayer;
+        BYTE b[6] = { 0xDC, 0x05 };                             // fadd qword ptr [g_aiTarget]
+        DWORD a = reinterpret_cast<DWORD>(&g_aiTarget); memcpy(b + 2, &a, 4);
+        ok = ok && PatchBytes(hot::aiTargetChance, b, 6);
+    }
+    if (g_cfg.aiAreaWeaponLimit != 2) {
+        BYTE n = (BYTE)(g_cfg.aiAreaWeaponLimit < 1 ? 1 : g_cfg.aiAreaWeaponLimit > 127 ? 127 : g_cfg.aiAreaWeaponLimit);
+        ok = ok && PatchBytes(hot::aiAreaLimit, &n, 1);
+    }
+    Logf("AI: %s; lead slowdown %s, a shot every %.1f s, %.0f%%+ at the player, area weapons up to %d at once, start boost %.0f%%\n",
+         ok ? "on" : "patch FAILED", g_cfg.aiLeadSlowdown ? "on" : "off", g_aiCooldown, g_aiTarget, g_cfg.aiAreaWeaponLimit, g_cfg.aiStartBoost);
+}
+
+// ---------------------------------------------------------------------------
+// Start boost. The 3-2-1 dial (GSSingle321_c) has four Flash animations: the
+// text (3-2-1-GO: it times the start), the gauge, the wheel and the fire. After
+// its intro the gauge loops; pressing accelerate while the gauge is on frames
+// 127-144 (the green light) gives the boost start - one try (0x4E8619). The
+// gauge and the wheel are run boostMeterSpeed times as fast: each update they get
+// the extra time on top of the game's own step. The text, and so the countdown
+// and GO, keep their timing.
+// ---------------------------------------------------------------------------
+typedef void (__attribute__((thiscall)) *Upd321_t)(BYTE*);
+typedef bool (__attribute__((thiscall)) *PastMark_t)(BYTE*, const char*);
+static void __attribute__((thiscall)) Hk321Update(BYTE* self) {
+    float k = g_cfg.boostMeterSpeed;
+    if (k > 1.0f && !self[0x494] && *reinterpret_cast<int*>(self + 0x30) < 5) {   // no press yet, before GO
+        float dt = *reinterpret_cast<const float*>(hot::frameDt);
+        BYTE* anims[2] = { self + 0x1B0, self + 0x2C4 };        // the gauge, the wheel
+        for (BYTE* a : anims)
+            if (*reinterpret_cast<int*>(a + 0x18) == 2 &&       // playing, past its intro: looping
+                reinterpret_cast<PastMark_t>(hot::fnAnimPastMark)(a, reinterpret_cast<const char*>(hot::strIntroEnd)))
+                *reinterpret_cast<float*>(a + 0x14) += (k - 1.0f) * dt * (a[0x23] ? 1.0f : -1.0f);
+    }
+    reinterpret_cast<Upd321_t>(hot::fn321Update)(self);
+}
+static void InstallStartBoost() {
+    if (g_cfg.boostMeterSpeed <= 1.0f) return;
+    if (!PatchPointer(reinterpret_cast<void**>(hot::vt321Update), reinterpret_cast<void*>(&Hk321Update))) {
+        Logf("start boost: patch FAILED\n");
+        return;
+    }
+    Logf("start boost: meter x%.2f\n", g_cfg.boostMeterSpeed);
+}
+
+// ---------------------------------------------------------------------------
+// Starting grid. Each track has one start action point per grid slot (type 1,
+// index = slot; position at +0x40, heading = matrix row 2 at +0x30), laid one
+// behind the other ~15 apart: the cars start in single file. GSWorldInitState_c
+// (and GSWorldResetState_c on a restart) puts each car on its slot's point with
+// 0x63E750. The mod puts them in a compact grid instead, as in the trailer:
+// from the front of the game's line, facing the way the start points face,
+// gridColumns abreast gridWidth apart, rows gridRowGap apart, each car to the
+// right gridStagger further back (the rows descend; with gridRowGap = gridColumns
+// x gridStagger every car is further back than the one before, as on an F1
+// grid across four lanes). The car order is kept.
+// ---------------------------------------------------------------------------
+static const BYTE* FindStartAP(int idx) {
+    const DWORD lists[2] = { hot::apUserList, hot::apList };
+    for (DWORD list : lists) {
+        BYTE* const* aps = *reinterpret_cast<BYTE* const* const*>(list);
+        int n = *reinterpret_cast<const int*>(list + 4);
+        for (int i = 0; aps && i < n && i < 4096; i++) {
+            const BYTE* ap = aps[i];
+            if (ap && *reinterpret_cast<const short*>(ap + 0x50) == 1 && *reinterpret_cast<const short*>(ap + 0x52) == idx) return ap;
+        }
+    }
+    return nullptr;
+}
+typedef void (__attribute__((thiscall)) *PlaceCar_t)(BYTE*, const float*, const float*, int, float, int);
+static void __attribute__((thiscall)) HkGridPlace(BYTE* car, const float* pos, const float* mat, int a3, float a4, int a5) {
+    const BYTE* ap = reinterpret_cast<const BYTE*>(pos) - 0x40;
+    int slot = *reinterpret_cast<const short*>(ap + 0x52);
+    const BYTE* ap0 = FindStartAP(0);
+    int n = 0;                                                  // start points on this track
+    while (n < 16 && FindStartAP(n)) n++;
+    if (!g_cfg.gridLayout || slot < 0 || slot >= n || n < 2 || !ap0) {
+        reinterpret_cast<PlaceCar_t>(hot::fnPlaceCar)(car, pos, mat, a3, a4, a5);
+        return;
+    }
+    // ahead: the way the cars face (the start point's row 2), level; right: across
+    const float* h = reinterpret_cast<const float*>(ap0 + 0x30);
+    float ah[3] = { h[0], 0.0f, h[2] };
+    float al = sqrtf(Dot3(ah, ah));
+    if (al < 0.01f) { reinterpret_cast<PlaceCar_t>(hot::fnPlaceCar)(car, pos, mat, a3, a4, a5); return; }
+    ah[0] /= al; ah[2] /= al;
+    float rt[3] = { ah[2], 0.0f, -ah[0] };
+    // the front of the game's line: the start point furthest ahead; the car order
+    // (slot 0 first) is kept, front to back
+    const BYTE* front = ap0; float best = -1e30f;
+    for (int i = 0; i < n; i++) {
+        const float* p = reinterpret_cast<const float*>(FindStartAP(i) + 0x40);
+        float d = p[0] * ah[0] + p[2] * ah[2];
+        if (d > best) { best = d; front = FindStartAP(i); }
+    }
+    const float* p0 = reinterpret_cast<const float*>(ap0 + 0x40);
+    const float* pn = reinterpret_cast<const float*>(FindStartAP(n - 1) + 0x40);
+    bool slot0Front = p0[0] * ah[0] + p0[2] * ah[2] >= pn[0] * ah[0] + pn[2] * ah[2];
+    int rank = slot0Front ? slot : n - 1 - slot;                // 0 = pole
+    int cols = g_cfg.gridColumns < 1 ? 1 : g_cfg.gridColumns > 8 ? 8 : g_cfg.gridColumns;
+    int row = rank / cols, col = rank % cols;
+    float across = (col - (cols - 1) * 0.5f) * g_cfg.gridWidth;
+    float back = row * g_cfg.gridRowGap + col * g_cfg.gridStagger;   // each car further right, further back
+    const float* fp = reinterpret_cast<const float*>(front + 0x40);
+    float np[3] = { fp[0] + rt[0] * across - ah[0] * back, fp[1], fp[2] + rt[2] * across - ah[2] * back };
+    Logf("grid: slot %d -> row %d column %d (%.1f %.1f %.1f)\n", slot, row, col, np[0], np[1], np[2]);
+    reinterpret_cast<PlaceCar_t>(hot::fnPlaceCar)(car, np, reinterpret_cast<const float*>(front + 0x10), a3, a4, a5);
+}
+static void InstallGrid() {
+    if (!g_cfg.gridLayout) { Logf("grid: original (gridLayout=0)\n"); return; }
+    if (!PatchCall(hot::callGridPlace, reinterpret_cast<void*>(&HkGridPlace), 5) ||
+        !PatchCall(hot::callGridReset, reinterpret_cast<void*>(&HkGridPlace), 5)) { Logf("grid: patch FAILED\n"); return; }
+    Logf("grid: %d abreast, %.1f apart\n", g_cfg.gridColumns, g_cfg.gridWidth);
+}
+
+// ---------------------------------------------------------------------------
 // Tuning. The game's data (car physics, cameras, effects...) is in scripts:
 // keywords followed by numbers, read with Script::ReadFloat / ReadInt (0x5C6B70,
 // 0x5C6B90; about 1,800 call sites). Both are replaced: every number is logged
@@ -1765,6 +2474,10 @@ static TOverride g_tov[512]; static int g_tovN = 0;
 static FILE* g_tlog = nullptr;
 static CRITICAL_SECTION g_tLock;
 static bool g_tLockInit = false;
+static void TuningFlush() {
+    if (!g_tlog || !g_tLockInit) return;
+    EnterCriticalSection(&g_tLock); fflush(g_tlog); LeaveCriticalSection(&g_tLock);
+}
 static bool IsNumberTok(const char* s) {
     if (!s || !*s) return false;
     char* e; strtod(s, &e);
@@ -1846,6 +2559,8 @@ static double Tune(BYTE* scr, const char* keyTok, const char* valTok, double v, 
         if (idx) snprintf(kk, sizeof(kk), "%s#%d", key, idx); else lstrcpynA(kk, key, sizeof(kk));
         if (out != v) fprintf(g_tlog, "%-28.28s %-32s = %-12s -> %g%s  @%06lX\n", base, kk, valTok, out, isInt ? " (int)" : "", caller);
         else fprintf(g_tlog, "%-28.28s %-32s = %-12s%s  @%06lX\n", base, kk, valTok, isInt ? " (int)" : "", caller);
+        static DWORD lastFlush = 0;                             // (the game can be killed without unloading us)
+        if (GetTickCount() - lastFlush > 1000) { fflush(g_tlog); lastFlush = GetTickCount(); }
     }
     LeaveCriticalSection(&g_tLock);
     return out;
@@ -1910,10 +2625,17 @@ BOOL APIENTRY DllMain(HMODULE h, DWORD reason, LPVOID reserved) {
             InstallGameLog();
             InstallCloseExits();
             InstallTuning();
+            InstallHazards();
+            InstallGrid();
+            InstallStartBoost();
+            InstallAI();
         }
     } else if (reason == DLL_PROCESS_DETACH) {
         if (reserved) g_logLockInit = false;
-        if (g_log) { Logf("speed FOV: fastest camera speed seen %.1f units/s\n", g_maxCamSpeed); Logf("=== shutdown ===\n"); fclose(g_log); g_log = nullptr; }
+        if (g_log) {
+            Logf("speed FOV: fastest camera speed seen %.1f units/s\n", g_maxCamSpeed);
+            if (g_hzOn) HazardReport();
+            Logf("=== shutdown ===\n"); fclose(g_log); g_log = nullptr; }
         if (g_glog && !reserved) { GameLogRepeats(true); fclose(g_glog); g_glog = nullptr; }   // (FreeLibrary only)
         if (g_tlog) fflush(g_tlog);
     }
