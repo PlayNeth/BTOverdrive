@@ -1,5 +1,8 @@
-// HWBTFix.asi  v0.3.8
-// Fixes for Hot Wheels: Beat That! (PC, HOT.exe)
+// HWBTMod.asi  v0.1.0
+// Gameplay mod for Hot Wheels: Beat That! (PC, HOT.exe), forked from HWBTFix
+// 0.3.8 (the vanilla fixes: portable install, high frame rate, music...). Use
+// one or the other: whichever loads second finds the game already patched and
+// stays off.
 //
 // Analysed exe: HOT.exe SHA-1 0c6c388cd9a8326bfea4da56049ad58a270d4830
 // (PE timestamp 0x4721CA06, image base 0x400000, no ASLR). Every patch site is
@@ -19,7 +22,7 @@
 //    built in 0x40E280 with SHGetSpecialFolderLocation at 0x40E3E1).
 //
 // What this ASI does:
-//  - portableRegistry: the game's registry key is answered from HWBTFix.ini
+//  - portableRegistry: the game's registry key is answered from HWBTMod.ini
 //    (width/height/detail keys); nothing is read from or written to the
 //    Windows registry for it. Other keys (CPU info) are untouched.
 //  - width/height: any resolution (0 = desktop resolution); the 1024..1600
@@ -34,7 +37,7 @@
 //  - raceMusic: each race plays its own song, results music plays (the PC
 //    port's song-name lookup was a stub).
 //  - gameLog: diagnostics - the game's own debug messages (an empty function in
-//    the release build) and failed sound lookups to HWBTFix_game.log.
+//    the release build) and failed sound lookups to HWBTMod_game.log.
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -46,7 +49,8 @@
 #include <cmath>
 #include <mmsystem.h>
 
-#define HWBT_VERSION "0.3.8"
+#define HWBT_VERSION "0.3.1"
+#define HWBT_BASE "HWBTFix 0.3.8"
 
 // ---------------------------------------------------------------------------
 // Game addresses
@@ -107,6 +111,14 @@ namespace hot {
     const DWORD effRows        = 0x4260E0;   // slot 6: rows 0-2 (bool)
     const DWORD garageLift     = 0x4EE61F;   // fld [ebp+0x97C]: car select/garage car's ride height, added to its node
                                              //   (ebp = GSHotGarageState; eax = the node's world, used right after)
+    // tuning (see "Tuning")
+    const DWORD scrReadFloat   = 0x5C6B70;   // Script::ReadFloat (thiscall): next token, atof
+    const DWORD scrReadInt     = 0x5C6B90;   // Script::ReadInt(bool* ok) (thiscall): next token, atoi
+    const DWORD scrNextToken   = 0x5C6450;   // Script::NextToken (thiscall); current token at +0x214
+    const DWORD scrFileName    = 0x5B2130;   // cdecl (index, char* out): archive file name; the script's index at +0x20C
+    // speed field of view (see "Speed FOV")
+    const DWORD callCamFov     = 0x5BA4ED;   // call 0x53C980 in Camera::Apply: set the field of view (cdecl, degrees)
+    const DWORD fnSetFov       = 0x53C980;
     struct Sig { DWORD addr; const char* bytes; int len; };
     const Sig kSigs[] = {
         { callDocsFolder, "\xFF\x15\x20\x74\x97\x00", 6 },
@@ -132,6 +144,10 @@ namespace hot {
                           "\xB9\x07\x00\x00\x00\x33\xD2\xF3\xA6\x74\x05\x83\xC3\x01\xEB\x8B", 36 },
         { setWorld,       "\x83\xEC\x40\x8B\x44\x24\x44", 7 },       // sub esp,0x40 / mov eax,[esp+0x44]
         { getXform,       "\x8D\x41\x10\xC3\xCC", 5 },               // lea eax,[ecx+0x10] / ret / int3
+        { callCamFov,     "\xE8\x8E\x24\xF8\xFF", 5 },               // call 0x53C980
+        { scrReadFloat,   "\x51\xE8\xDA\xF8\xFF\xFF\x8B\x89\x14\x02\x00\x00", 12 },   // push ecx / call NextToken / mov ecx,[ecx+0x214]
+        { scrReadInt,     "\xE8\xBB\xF8\xFF\xFF\x8B\x44\x24\x04", 9 },               // call NextToken / mov eax,[esp+4]
+        { scrNextToken,   "\x80\xB9\x20\x02\x00\x00\x00", 7 },                       // cmp byte [ecx+0x220], 0
         { callVehLights,  "\xE8\x61\xDD\xFF\xFF", 5 },               // call 0x6029B0
         { 0x455D12,       "\xE8\x29\xD2\x1A\x00", 5 },               // call 0x602F40 (x3)
         { 0x455D2F,       "\xE8\x0C\xD2\x1A\x00", 5 },
@@ -168,7 +184,11 @@ struct Config {
     int  closeExits = 1;                 // closing the window quits like Alt+F4
     int  raceMusic = 1;                  // each race plays its own song (the PC port always played song 0)
     int  logToFile = 1;
-    int  gameLog = 0;                    // diagnostics: the game's own debug messages to HWBTFix_game.log
+    int  gameLog = 0;                    // diagnostics: the game's own debug messages to HWBTMod_game.log
+    int  tuningLog = 1;                  // every number the game's scripts load, to HWBTMod_tuning.log
+    float speedFov = 12.0f;              // degrees added to the camera's field of view at speed (0 = off)
+    float speedFovMin = 11.0f;           // speed (units/s) where it starts (11 ~ 25 mph)
+    float speedFovMax = 45.0f;           // speed where it's full (45 ~ 100 mph)
 };
 static Config g_cfg;
 static char g_asiDir[MAX_PATH] = {};     // trailing backslash
@@ -197,7 +217,7 @@ static void InitDirs() {
 }
 
 static const char kIniText[] =
-    "; HWBTFix.ini (v" HWBT_VERSION ") - Hot Wheels: Beat That!\n"
+    "; HWBTMod.ini (v" HWBT_VERSION ") - Hot Wheels: Beat That!\n"
     "; --- display (replaces DisplayConfig.exe) ---\n"
     "; resolution; 0 = desktop resolution\n"
     "width=0\n"
@@ -227,11 +247,21 @@ static const char kIniText[] =
     "raceMusic=1\n"
     "logToFile=1\n"
     "; diagnostics: the game's own debug messages (errors, missing files, unfinished PC code) and\n"
-    ";   failed sound lookups to HWBTFix_game.log, and frame-rate statistics to this log\n"
-    "gameLog=0\n";
+    ";   failed sound lookups to HWBTMod_game.log, and frame-rate statistics to this log\n"
+    "gameLog=0\n"
+    "; --- tuning ---\n"
+    "; list every number the game's scripts load (physics, cameras, effects...) in HWBTMod_tuning.log;\n"
+    ";   changes go in HWBTMod_tuning.txt (see the top of the log)\n"
+    "tuningLog=1\n"
+    "; --- camera ---\n"
+    "; widen the race camera's field of view with speed: degrees added at full speed (0 = off),\n"
+    ";   from speedFovMin to speedFovMax (game units per second; 11 ~ 25 mph, 45 ~ 100 mph)\n"
+    "speedFov=12\n"
+    "speedFovMin=11\n"
+    "speedFovMax=45\n";
 
 static void LoadConfig() {
-    char path[MAX_PATH]; snprintf(path, sizeof(path), "%sHWBTFix.ini", g_asiDir);
+    char path[MAX_PATH]; snprintf(path, sizeof(path), "%sHWBTMod.ini", g_asiDir);
     FILE* f = fopen(path, "r");
     if (!f) {
         if ((f = fopen(path, "w"))) { fputs(kIniText, f); fclose(f); }
@@ -265,6 +295,10 @@ static void LoadConfig() {
         else if (!_stricmp(key, "raceMusic"))          g_cfg.raceMusic = n;
         else if (!_stricmp(key, "gameLog"))            g_cfg.gameLog = n;
         else if (!_stricmp(key, "logToFile"))          g_cfg.logToFile = n;
+        else if (!_stricmp(key, "tuningLog"))          g_cfg.tuningLog = n;
+        else if (!_stricmp(key, "speedFov"))           g_cfg.speedFov = (float)atof(val);
+        else if (!_stricmp(key, "speedFovMin"))        g_cfg.speedFovMin = (float)atof(val);
+        else if (!_stricmp(key, "speedFovMax"))        g_cfg.speedFovMax = (float)atof(val);
     }
     fclose(f);
 }
@@ -336,7 +370,8 @@ static bool CheckExe() {
     for (const auto& s : hot::kSigs) {
         if (IsBadReadPtr(reinterpret_cast<void*>(s.addr), s.len) ||
             memcmp(reinterpret_cast<void*>(s.addr), s.bytes, s.len) != 0) {
-            Logf("exe check: bytes at 0x%06lX differ - not the analysed HOT.exe, all fixes off\n",
+            Logf("exe check: bytes at 0x%06lX differ - not the analysed HOT.exe, or already patched (HWBTFix\n"
+                 "  loaded as well?): all changes off\n",
                  (unsigned long)s.addr);
             return false;
         }
@@ -605,7 +640,9 @@ extern "C" void __cdecl RegCar(BYTE* car) {          // per car, per step, at th
     if (!g_interpOn) return;
     if (Track* t = FindTrack(car, 1)) t->seenStep = g_stepsDone + 1;
 }
+static BYTE* g_applyCam = nullptr;                   // the camera Camera::Apply is setting up (speed FOV)
 extern "C" void __cdecl RegCam(BYTE* cam) {          // per camera, per frame
+    g_applyCam = cam;
     if (!cam) return;
     if (!g_inRender) g_st.camOutside++;
     if (Track* t = FindTrack(cam, 2)) t->seenFrame = g_frameNo;
@@ -662,6 +699,7 @@ struct MTrack {
     LONG   redrawn, external;
     // computed while drawing (scene-graph nodes): history of the value handed to SetWorld
     LONG   fFrame, fStep; // frame and step of the last value taken
+    LONG   fPrevStep;     // step of the value before it (fprev)
     int    fn;            // values in a row, one per step (0..2)
     LONG   fPerFrameStep; // last step it also changed between steps (animated per frame: left alone for a while)
     bool   drawnOnly;     // the drawing code rewrote it once: never blended in memory again (see HkFrameEnd)
@@ -702,22 +740,36 @@ static void MRehash() {
 // it's animated per frame (or blended already) and passed through untouched.
 static bool Blend(const float* p, const float* c, float a, float* o);
 static float g_alpha = 1.0f;                       // this frame's blend factor (set before the 3D pass)
+static const float* FollowCar(const float* v, float* o);   // (see "Effects and shadows")
 static const float* FilterWorld(MTrack* t, const float* v) {
     if (t->fFrame != g_frameNo) {                  // first time this frame
         t->fFrame = g_frameNo;
         if (t->fStep != g_stepsDone) {             // step(s) since the last value
-            if (t->fStep == g_stepsDone - 1 && t->fn) { memcpy(t->fprev, t->fcur, 64); if (t->fn < 2) t->fn++; }
-            else t->fn = 1;                        // a gap (or the first value): no neighbour yet
+            // Usually one step; a slow frame can have two or more, and then the
+            // value in between was never seen. The older one is still a fine
+            // neighbour: blend across the steps (below). Only a long gap (or the
+            // first value) starts over.
+            LONG gap = g_stepsDone - t->fStep;
+            if (t->fn && gap >= 1 && gap <= 4) { memcpy(t->fprev, t->fcur, 64); t->fPrevStep = t->fStep; t->fn = 2; }
+            else t->fn = 1;
             memcpy(t->fcur, v, 64);
             t->fStep = g_stepsDone;
         } else if (memcmp(t->fcur, v, 64)) {       // changed without a step
             t->fPerFrameStep = g_stepsDone;
         }
     }
-    if (PerFrame(t) || t->fn < 2 || memcmp(t->fcur, v, 64) || !memcmp(t->fprev, t->fcur, 64)) return v;
-    static float out[4][16]; static int k = 0;
-    float* o = out[k = (k + 1) & 3];
-    if (!Blend(t->fprev, t->fcur, g_alpha, o)) { g_st.mCuts++; return v; }
+    static float out[8][16]; static int k = 0;
+    float* o = out[k = (k + 1) & 7];
+    // Animated per frame (a car part like a spoiler, moved every frame on top
+    // of the car): left at its raw position it sat a fraction of a step behind
+    // the smoothed body, and since that mark wears off after half a second it
+    // jumped back and forth. On a race car it follows the car's blend instead.
+    if (PerFrame(t)) { const float* f = FollowCar(v, o); return f ? f : v; }
+    if (t->fn < 2 || memcmp(t->fcur, v, 64) || !memcmp(t->fprev, t->fcur, 64)) return v;
+    // the drawn moment is step (fStep - 1 + alpha); fprev is from fPrevStep
+    float span = (float)(t->fStep - t->fPrevStep);
+    float f = span > 1.0f ? (span - 1.0f + g_alpha) / span : g_alpha;
+    if (!Blend(t->fprev, t->fcur, f, o)) { g_st.mCuts++; return v; }
     g_st.fBlended++;
     return o;
 }
@@ -731,7 +783,7 @@ extern "C" const float* __cdecl RegMat(float* p, int src, DWORD caller) {
         t = &g_mt[g_mtN++];
         t->p = p; t->n = 0; t->written = false; t->src = 0; t->caller = caller; t->redrawn = t->external = 0;
         t->snapStep = t->skipFrame = LONG_MIN / 2;
-        t->fFrame = t->fStep = LONG_MIN / 2; t->fn = 0; t->fPerFrameStep = LONG_MIN / 2; t->drawnOnly = false;
+        t->fFrame = t->fStep = t->fPrevStep = LONG_MIN / 2; t->fn = 0; t->fPerFrameStep = LONG_MIN / 2; t->drawnOnly = false;
         int h = MHash(p);
         while (g_mHash[h]) h = (h + 1) & 4095;
         g_mHash[h] = (short)g_mtN;
@@ -1028,7 +1080,11 @@ static const float* NodeWorld(BYTE* node, float* buf) {
             if (m->written) return p;                           // blended in memory already
             if (m->fn == 2 && m->fStep == g_stepsDone && !PerFrame(m) &&
                 !memcmp(m->fcur, p, 64) && memcmp(m->fprev, m->fcur, 64))
-                return Blend(m->fprev, m->fcur, g_alpha, buf + 16) ? buf + 16 : p;
+            {
+                float span = (float)(m->fStep - m->fPrevStep);       // (as FilterWorld: across 2+ steps)
+                float f = span > 1.0f ? (span - 1.0f + g_alpha) / span : g_alpha;
+                return Blend(m->fprev, m->fcur, f, buf + 16) ? buf + 16 : p;
+            }
         }
     }
     for (Track& t : g_tr) {                                     // a car's body node: follow the car
@@ -1043,6 +1099,26 @@ static const float* NodeWorld(BYTE* node, float* buf) {
         }
     }
     return p;
+}
+
+// A matrix on a race car (within 4 units of its position) moved by the car's
+// step -> blend transform: whatever the part does on its own is kept, the car's
+// motion is smoothed. nullptr = no race car there (or no blend this frame).
+static const float* FollowCar(const float* v, float* o) {
+    Track* best = nullptr; float bestD = 4.0f * 4.0f;
+    for (Track& t : g_tr) {
+        if (!t.obj || t.kind != 1 || t.n != 2 || t.snapStep != g_stepsDone) continue;
+        float d[3] = { v[12] - t.cur[12], v[13] - t.cur[13], v[14] - t.cur[14] };
+        float dd = Dot3(d, d);
+        if (dd < bestD) { bestD = dd; best = &t; }
+    }
+    if (!best) return nullptr;
+    const float* b = CarBlend(best->obj);
+    float inv[16], d[16];
+    if (!b || !InvAffine(best->cur, inv)) return nullptr;
+    MulAffine(inv, b, d);                                       // the car's step -> blend
+    MulAffine(v, d, o);
+    return o;
 }
 
 // The getters. id: 0 position, 1 position of [+0x18] only, 2 position of the
@@ -1177,6 +1253,82 @@ asm(".text\n"
     "    popl %eax\n"
     "    ret\n");
 
+// ---------------------------------------------------------------------------
+// Speed FOV. Camera::Apply hands the camera's field of view to the renderer
+// (0x5BA4ED); it's widened by up to speedFov degrees with the speed of the car
+// it follows, between speedFovMin and speedFovMax: the player's car nearest the
+// camera (else the nearest AI race car; car-select cars don't count) within 40 units, from its last two step
+// positions (physics: exactly once a step; the camera itself may move per frame,
+// which made a speed taken from it jump), smoothed over about a third of a second.
+// Cameras with no race car near (menus, car select) are left alone; across a
+// cut (a jump of over 25 units in a step) the last speed is kept.
+// ---------------------------------------------------------------------------
+// Each camera keeps its own smoothed speed: the game sets up more than one
+// camera a frame, and a shared value was pulled to and fro between the moving
+// race camera and the still ones, so the field of view jumped every frame.
+struct CamFov { BYTE* cam; float speed; LONGLONG qpc; float fovPrev, fovCur; LONG fovStep; };
+static CamFov g_camFov[8];
+static float g_maxCamSpeed = 0.0f;           // for the log (calibration)
+extern "C" void __cdecl HkSetFov(float fov) {
+    const Track* car = nullptr;                                 // the car this camera follows
+    if (g_interpOn && g_applyCam) {
+        const float* cp = reinterpret_cast<const float*>(g_applyCam + 0x10) + 12;   // the camera's position
+        float best = 40.0f * 40.0f; bool bestPlayer = false;
+        for (const Track& t : g_tr) {
+            if (!t.obj || t.kind != 1 || t.n != 2 || t.snapStep != g_stepsDone) continue;
+            float d[3] = { t.cur[12] - cp[0], t.cur[13] - cp[1], t.cur[14] - cp[2] };
+            float dd = Dot3(d, d);
+            DWORD vt = reinterpret_cast<DWORD>(t.vt);
+            bool player = vt == 0x8A0384;                       // GSPlayerRaceCar_c
+            if (!player && vt != 0x8A0144 && vt != 0x8A3FA4) continue;   // GSAIRaceCar_c, GSRaceCar_c only
+            if (dd > 40.0f * 40.0f) continue;
+            if ((player && !bestPlayer) || (player == bestPlayer && dd < best)) { car = &t; best = dd; bestPlayer = player; }
+        }
+    }
+    CamFov* c = nullptr;
+    if (g_applyCam) for (CamFov& e : g_camFov) if (e.cam == g_applyCam) { c = &e; break; }
+    bool moving = false;                                        // the camera itself is tracked (it moves)
+    if (g_interpOn && g_applyCam)
+        for (const Track& t : g_tr) if (t.obj == g_applyCam && t.n == 2) { moving = true; break; }
+    if (!car && !c && !moving) {                                // still and no car (menus): as it is
+        reinterpret_cast<void (__cdecl *)(float)>(hot::fnSetFov)(fov);
+        return;
+    }
+    if (!c) {                                                   // new camera: take a free slot or the oldest
+        c = &g_camFov[0];
+        for (CamFov& e : g_camFov) if (!e.cam || e.qpc < c->qpc) c = &e;
+        c->cam = g_applyCam; c->speed = 0.0f; c->qpc = 0; c->fovStep = LONG_MIN / 2;
+    }
+    // The camera's own field of view changes on steps (the game's camera effects
+    // set it every step) while its position is interpolated: blend it the same way.
+    if (c->fovStep != g_stepsDone) {
+        c->fovPrev = c->fovStep == g_stepsDone - 1 ? c->fovCur : fov;
+        c->fovCur = fov;
+        c->fovStep = g_stepsDone;
+    }
+    if (fov == c->fovCur && fabsf(c->fovCur - c->fovPrev) < 20.0f)   // (a jump: a cut, not blended)
+        fov = c->fovPrev + (c->fovCur - c->fovPrev) * g_alpha;
+    float speed = 0.0f;                                         // (no car near: ease back to none)
+    if (car) {
+        float d[3] = { car->cur[12] - car->prev[12], car->cur[13] - car->prev[13], car->cur[14] - car->prev[14] };
+        float step = Len3(d);
+        speed = step < kCutDist ? step / *reinterpret_cast<float*>(hot::stepDt) : c->speed;   // (a cut: keep)
+    }
+    static LONGLONG qpf = 0;
+    LARGE_INTEGER q; QueryPerformanceCounter(&q);
+    if (!qpf) { LARGE_INTEGER f; QueryPerformanceFrequency(&f); qpf = f.QuadPart; }
+    float dt = c->qpc ? (float)(q.QuadPart - c->qpc) / (float)qpf : 0.0f;
+    c->qpc = q.QuadPart;
+    if (dt > 0.25f) dt = 0.25f;
+    c->speed += (speed - c->speed) * (1.0f - expf(-dt / 0.33f));   // ~1/3 s smoothing
+    if (c->speed > g_maxCamSpeed) g_maxCamSpeed = c->speed;
+    float span = g_cfg.speedFovMax - g_cfg.speedFovMin;
+    float x = span > 0.0f ? (c->speed - g_cfg.speedFovMin) / span : 0.0f;
+    if (x < 0.0f) x = 0.0f; else if (x > 1.0f) x = 1.0f;
+    x = x * x * (3.0f - 2.0f * x);                              // smoothstep
+    reinterpret_cast<void (__cdecl *)(float)>(hot::fnSetFov)(fov + g_cfg.speedFov * x);
+}
+
 // Frame cap: wait for our next frame time, then let the game's limiter measure
 // the frame without waiting (its minimum frame time set to 0 for the call).
 static LONGLONG g_qpf = 0, g_period = 0, g_next = 0;
@@ -1255,6 +1407,7 @@ static void InstallFrameRate() {
         { hot::effRow0, &EffRow0Stub }, { hot::effRows, &EffRowsStub } };
     for (const auto& h : effHooks) ok = ok && PatchJmp(h.at, reinterpret_cast<DWORD>(h.stub));
     ok = ok && PatchCall(hot::garageLift, reinterpret_cast<void*>(&GarageLiftStub), 6);
+    ok = ok && PatchCall(hot::callCamFov, reinterpret_cast<void*>(&HkSetFov), 5);   // (FOV blend + speed FOV)
     ok = ok && PatchCall(hot::callStepTail, reinterpret_cast<void*>(&HkStepTail), 5);
     ok = ok && PatchCall(hot::callFrameEnd, reinterpret_cast<void*>(&HkFrameEnd), 5);   // before the blend can happen
     ok = ok && PatchCall(hot::callRender3D, reinterpret_cast<void*>(&HkRender3D), 5);
@@ -1433,7 +1586,7 @@ static void InstallRaceMusic() {
 // The game's own debug output. HOT.exe has about 1,200 calls to a debug printf
 // (0x5890F0) - warnings, missing files, "not implemented on PC" - that the
 // release build turned into an empty function. It's restored here and written
-// to HWBTFix_game.log, each message (by format string) at most 5 times, with a
+// to HWBTMod_game.log, each message (by format string) at most 5 times, with a
 // count of further repeats every minute. Arguments are formatted defensively:
 // a bad string pointer prints as (bad) instead of crashing.
 // ---------------------------------------------------------------------------
@@ -1585,12 +1738,153 @@ static char __attribute__((thiscall)) HkSoundFind(void* self, BYTE* bank, const 
 }
 static void InstallGameLog() {
     if (!g_cfg.gameLog) return;
-    char path[MAX_PATH]; snprintf(path, sizeof(path), "%sHWBTFix_game.log", g_asiDir);
+    char path[MAX_PATH]; snprintf(path, sizeof(path), "%sHWBTMod_game.log", g_asiDir);
     if (!(g_glog = fopen(path, "w"))) { Logf("game log: can't create %s\n", path); return; }
     InitializeCriticalSection(&g_glogLock);
-    fprintf(g_glog, "HOT.exe debug messages (HWBTFix v" HWBT_VERSION "): time, caller, message\n");
+    fprintf(g_glog, "HOT.exe debug messages (HWBTMod v" HWBT_VERSION "): time, caller, message\n");
     if (!PatchJmp(hot::debugPrint, reinterpret_cast<DWORD>(&GameDebugPrint))) Logf("game log: patch FAILED\n");
     if (!PatchJmp(hot::soundFind, reinterpret_cast<DWORD>(&HkSoundFind))) Logf("game log: sound audit patch FAILED\n");
+}
+
+// ---------------------------------------------------------------------------
+// Tuning. The game's data (car physics, cameras, effects...) is in scripts:
+// keywords followed by numbers, read with Script::ReadFloat / ReadInt (0x5C6B70,
+// 0x5C6B90; about 1,800 call sites). Both are replaced: every number is logged
+// with its keyword and file (tuningLog=1), and HWBTMod_tuning.txt can set or
+// scale it before the game gets it:
+//     KEY = 2.5          set (every KEY, in every file)
+//     KEY *= 1.3         scale
+//     KEY#1 *= 1.3       the second number after KEY (KEY#0 = the first)
+//     file.ext:KEY = 2   only in that file
+//     @5F9FCF:MASS *= 0.8  only where that game code reads it (the @ address in
+//                        the log: the same keyword can mean different things,
+//                        e.g. a car's MASS and a wheel's MASS)
+// ---------------------------------------------------------------------------
+struct TOverride { char file[64]; DWORD caller; char key[48]; int idx; bool scale; float v; LONG hits; };
+static TOverride g_tov[512]; static int g_tovN = 0;
+static FILE* g_tlog = nullptr;
+static CRITICAL_SECTION g_tLock;
+static bool g_tLockInit = false;
+static bool IsNumberTok(const char* s) {
+    if (!s || !*s) return false;
+    char* e; strtod(s, &e);
+    return e != s && *e == 0;
+}
+static void LoadTuning() {
+    char path[MAX_PATH]; snprintf(path, sizeof(path), "%sHWBTMod_tuning.txt", g_asiDir);
+    FILE* f = fopen(path, "r");
+    if (!f) return;
+    char line[256];
+    while (fgets(line, sizeof(line), f) && g_tovN < 512) {
+        if (char* c = strpbrk(line, ";#\r\n")) {
+            if (*c == '#' && c[1] >= '0' && c[1] <= '9') {          // KEY#1: not a comment
+                if (char* c2 = strpbrk(c + 1, ";\r\n")) *c2 = 0;
+            } else *c = 0;
+        }
+        char* eq = strchr(line, '=');
+        if (!eq) continue;
+        bool scale = eq > line && eq[-1] == '*';
+        char* ke = scale ? eq - 1 : eq;
+        *ke = 0;
+        char* k = line; while (*k == ' ' || *k == '\t') k++;
+        char* kend = k + strlen(k); while (kend > k && (kend[-1] == ' ' || kend[-1] == '\t')) *--kend = 0;
+        if (!*k) continue;
+        TOverride& o = g_tov[g_tovN];
+        memset(&o, 0, sizeof(o));
+        if (char* colon = strchr(k, ':')) {
+            *colon = 0;
+            if (k[0] == '@') o.caller = strtoul(k + 1, nullptr, 16);
+            else lstrcpynA(o.file, k, sizeof(o.file));
+            k = colon + 1;
+        }
+        if (char* hash = strchr(k, '#')) { *hash = 0; o.idx = atoi(hash + 1); }
+        lstrcpynA(o.key, k, sizeof(o.key));
+        o.scale = scale;
+        o.v = (float)atof(eq + 1);
+        g_tovN++;
+    }
+    fclose(f);
+    Logf("tuning: %d change(s) from %s\n", g_tovN, path);
+}
+// The script's file name (from the archive index), cached per script.
+static const char* ScriptName(BYTE* scr) {
+    static BYTE* last = nullptr; static int lastIdx = -2; static char name[512];
+    int idx = *reinterpret_cast<int*>(scr + 0x20C);
+    if (scr != last || idx != lastIdx) {
+        last = scr; lastIdx = idx;
+        name[0] = 0;
+        if (idx >= 0) reinterpret_cast<void (__cdecl *)(int, char*)>(hot::scrFileName)(idx, name);
+        name[sizeof(name) - 1] = 0;
+        if (!name[0]) lstrcpynA(name, "?", sizeof(name));
+    }
+    return name;
+}
+static double Tune(BYTE* scr, const char* keyTok, const char* valTok, double v, bool isInt, DWORD caller) {
+    static BYTE* lastScr = nullptr; static char lastKey[48]; static int lastIdx = 0;
+    if (!g_tlog && !g_tovN) return v;
+    EnterCriticalSection(&g_tLock);
+    const char* key; int idx;
+    if (scr == lastScr && IsNumberTok(keyTok)) { key = lastKey; idx = ++lastIdx; }   // KEY 1 2 3: the 2nd, 3rd...
+    else {
+        lstrcpynA(lastKey, keyTok && !IsBadStringPtrA(keyTok, 48) ? keyTok : "?", sizeof(lastKey));
+        key = lastKey; idx = lastIdx = 0;
+    }
+    lastScr = scr;
+    const char* file = ScriptName(scr);
+    const char* base = strrchr(file, '\\'); base = base ? base + 1 : file;
+    double out = v;
+    for (int i = 0; i < g_tovN; i++) {
+        TOverride& o = g_tov[i];
+        if (o.idx != idx || _stricmp(o.key, key) || (o.file[0] && _stricmp(o.file, base)) ||
+            (o.caller && o.caller != caller)) continue;
+        out = o.scale ? v * o.v : o.v;
+        if (isInt) out = (double)(long)(out + (out < 0 ? -0.5 : 0.5));
+        o.hits++;
+    }
+    if (g_tlog) {
+        char kk[64];
+        if (idx) snprintf(kk, sizeof(kk), "%s#%d", key, idx); else lstrcpynA(kk, key, sizeof(kk));
+        if (out != v) fprintf(g_tlog, "%-28.28s %-32s = %-12s -> %g%s  @%06lX\n", base, kk, valTok, out, isInt ? " (int)" : "", caller);
+        else fprintf(g_tlog, "%-28.28s %-32s = %-12s%s  @%06lX\n", base, kk, valTok, isInt ? " (int)" : "", caller);
+    }
+    LeaveCriticalSection(&g_tLock);
+    return out;
+}
+typedef const char* (__attribute__((thiscall)) *NextToken_t)(BYTE*);
+static float __attribute__((thiscall)) HkReadFloat(BYTE* scr) {
+    DWORD caller = (DWORD)(UINT_PTR)__builtin_return_address(0);
+    const char* key = *reinterpret_cast<const char**>(scr + 0x214);
+    reinterpret_cast<NextToken_t>(hot::scrNextToken)(scr);
+    const char* tok = *reinterpret_cast<const char**>(scr + 0x214);
+    float v = (float)atof(tok);                                  // as the original: atof, to float
+    return (float)Tune(scr, key, tok, v, false, caller);
+}
+static int __attribute__((thiscall)) HkReadInt(BYTE* scr, char* ok) {
+    DWORD caller = (DWORD)(UINT_PTR)__builtin_return_address(0);
+    const char* key = *reinterpret_cast<const char**>(scr + 0x214);
+    reinterpret_cast<NextToken_t>(hot::scrNextToken)(scr);
+    if (ok) *ok = 1;
+    const char* tok = *reinterpret_cast<const char**>(scr + 0x214);
+    int v = atoi(tok);
+    return (int)Tune(scr, key, tok, (double)v, true, caller);
+}
+static void InstallTuning() {
+    LoadTuning();
+    if (g_cfg.tuningLog) {
+        char path[MAX_PATH]; snprintf(path, sizeof(path), "%sHWBTMod_tuning.log", g_asiDir);
+        if ((g_tlog = fopen(path, "w"))) {
+            setvbuf(g_tlog, nullptr, _IOFBF, 1 << 16);
+            fprintf(g_tlog, "HWBTMod v" HWBT_VERSION ": every number the game's scripts read, as it reads them.\n"
+                            "file, keyword (#n = the n-th number after it), value as written, -> value used if\n"
+                            "HWBTMod_tuning.txt changed it, @ the game code reading it. HWBTMod_tuning.txt lines:\n"
+                            "  KEY = 2.5    KEY *= 1.3    KEY#1 *= 1.3    file.ext:KEY = 2    @5F9FCF:MASS *= 0.8\n\n");
+        }
+    }
+    if (!g_tlog && !g_tovN) return;
+    InitializeCriticalSection(&g_tLock); g_tLockInit = true;
+    if (!PatchJmp(hot::scrReadFloat, reinterpret_cast<DWORD>(&HkReadFloat)) ||
+        !PatchJmp(hot::scrReadInt, reinterpret_cast<DWORD>(&HkReadInt)))
+        Logf("tuning: patch FAILED\n");
 }
 
 // ---------------------------------------------------------------------------
@@ -1603,10 +1897,10 @@ BOOL APIENTRY DllMain(HMODULE h, DWORD reason, LPVOID reserved) {
         InitDirs();
         LoadConfig();
         if (g_cfg.logToFile) {
-            char path[MAX_PATH]; snprintf(path, sizeof(path), "%sHWBTFix.log", g_asiDir);
+            char path[MAX_PATH]; snprintf(path, sizeof(path), "%sHWBTMod.log", g_asiDir);
             g_log = fopen(path, "w");
         }
-        Logf("HWBTFix v" HWBT_VERSION " | exe folder %s | root %s\n", g_gameDir, g_rootDir);
+        Logf("HWBTMod v" HWBT_VERSION " (based on " HWBT_BASE ") | exe folder %s | root %s\n", g_gameDir, g_rootDir);
         g_knownExe = CheckExe();
         if (g_knownExe) {
             InstallSaveFolder();
@@ -1615,11 +1909,13 @@ BOOL APIENTRY DllMain(HMODULE h, DWORD reason, LPVOID reserved) {
             InstallRaceMusic();
             InstallGameLog();
             InstallCloseExits();
+            InstallTuning();
         }
     } else if (reason == DLL_PROCESS_DETACH) {
         if (reserved) g_logLockInit = false;
-        if (g_log) { Logf("=== shutdown ===\n"); fclose(g_log); g_log = nullptr; }
+        if (g_log) { Logf("speed FOV: fastest camera speed seen %.1f units/s\n", g_maxCamSpeed); Logf("=== shutdown ===\n"); fclose(g_log); g_log = nullptr; }
         if (g_glog && !reserved) { GameLogRepeats(true); fclose(g_glog); g_glog = nullptr; }   // (FreeLibrary only)
+        if (g_tlog) fflush(g_tlog);
     }
     return TRUE;
 }
