@@ -49,7 +49,7 @@
 #include <cmath>
 #include <mmsystem.h>
 
-#define HWBT_VERSION "0.4.0"
+#define HWBT_VERSION "0.4.1"
 #define HWBT_BASE "HWBTFix 0.3.8"
 
 // ---------------------------------------------------------------------------
@@ -135,6 +135,25 @@ namespace hot {
     const DWORD fnPlaceCar     = 0x63E750;   // car: put on the ground at pos facing mat row 2 (thiscall; pos*, mat*, int, float, int)
     const DWORD apUserList     = 0x9680C0;   // ActionPoint* list (count at +4): searched first (0x60F6F0)
     const DWORD apList         = 0x96821C;   // ActionPoint* list (count at +4): then this one (0x60E0A0)
+    const DWORD curEvent       = 0x953D80;   // GSEvent_c*: the event being played
+    const DWORD fnGameMode     = 0x436E60;   // GSEvent_c: game mode (thiscall): 6 race, 7 rampage, 8 eliminator, 9 battle, 10 tournament
+    const DWORD lineTable      = 0x9680D0;   // -> the level's track lines (0x74 bytes each; 0x610000), count at 0x9680D4
+    const DWORD lineCount      = 0x9680D4;
+    const DWORD juncTable      = 0x9681B4;   // -> junction* table (count 0x9681B8): +0x1C short[8] lines, +0x2C entry, +0x42 count
+    const DWORD juncCount      = 0x9681B8;
+    const DWORD rampageTopSpd  = 0x92EA20;   // float 0.45: a Rampage AI car's TOP-SPEED = the player's x this (0x456FEA, its only user)
+    const DWORD callBrainTargets = 0x670EAE; // call 0x648B50 in the AI brain update: fill the car's target points
+    const DWORD blurFlagLevel  = 0x57287C;   // 0x5726C0: jne past "level's g_MotionBlur sets +0x31C" (75 18 -> EB 18: always past)
+    const DWORD blurAmount     = 0x575F65;   // post-processing: mov ecx,[ebx+0x234] right before g_MotionBlurAmount is set (amount at [esp+0x10])
+    const DWORD fnCollSparks   = 0x441BF0;   // collision sparks (thiscall: contact, mover, impact; ret 0xC)
+    const DWORD callCollSparks1 = 0x442714;  // call 0x441BF0
+    const DWORD callCollSparks2 = 0x442CC2;  // call 0x441BF0
+    const DWORD fnContactVec   = 0x620B00;   // contact (thiscall: out vec3*, body, byte 1): the contact's vector for that body
+    const DWORD fnSparkSpawn   = 0x566A40;   // cdecl (type, pos*, vel*, gravity*, float): a spark with its type's colour and width
+    const DWORD sparkSpawnEnd  = 0x563D23;   // spark spawn, every particle field set: fld dword ptr [ebx+0x1CB66D8] (now -> P+0x38)
+    const DWORD sparkStreakLen = 0x563CB7;   // spark spawn: fld dword ptr [0x89E1AC] (0.25: a streak's length in seconds of travel -> P+0x48)
+    const DWORD fnSparkSys     = 0x401424;   // cdecl: the spark system singleton (jmp 0x40D620)
+    const DWORD fnBrainTargets = 0x648B50;   //   (thiscall, brain; brain+0xC = car; points at car+0xC64, speeds at car+0xC6C)
     // start boost (see "Start boost")
     const DWORD vt321Update    = 0x8AF4DC;   // GSSingle321_c vtable slot 1: its update, 0x4E8500 (thiscall, no arguments)
     const DWORD fn321Update    = 0x4E8500;
@@ -217,6 +236,20 @@ namespace hot {
         { aiTargetChance, "\xDC\x05\xF0\xEF\x89\x00", 6 },           // fadd qword ptr [0x89EFF0]
         { 0x430978,       "\x83\x3D\x0C\x91\x95\x00\x02", 7 },     // cmp dword ptr [0x95910C], 2
         { fnPlaceCar,     "\x81\xEC\xF8\x00\x00\x00", 6 },           // sub esp, 0xF8
+        { fnGameMode,     "\x56\x8B\xF1\x8B\x06\x8B\x50\x18", 8 },   // push esi / mov esi,ecx / mov eax,[esi] / mov edx,[eax+0x18]
+        { callBrainTargets, "\xE8\x9D\x7C\xFD\xFF", 5 },             // call 0x648B50
+        { 0x456FEA,       "\xD8\x0D\x20\xEA\x92\x00", 6 },           // fmul dword ptr [0x92EA20]
+        { sparkStreakLen, "\xD9\x05\xAC\xE1\x89\x00", 6 },           // fld dword ptr [0x89E1AC]
+        { callCollSparks1, "\xE8\xD7\xF4\xFF\xFF", 5 },             // call 0x441BF0
+        { callCollSparks2, "\xE8\x29\xEF\xFF\xFF", 5 },             // call 0x441BF0
+        { fnContactVec,   "\x8B\x54\x24\x08\x83\xEC\x0C\x85\xD2", 9 },   // mov edx,[esp+8] / sub esp,0xC / test edx,edx
+        { fnSparkSpawn,   "\xE8\xDF\xA9\xE9\xFF\x8B\x4C\x24\x04", 9 },   // call 0x401424 / mov ecx,[esp+4]
+        { sparkSpawnEnd,  "\xD9\x83\xD8\x66\xCB\x01\xD9\x59\x38", 9 },   // fld dword ptr [ebx+0x1CB66D8] / fstp dword ptr [ecx+0x38]
+        { fnSparkSys,     "\xE9\xF7\xC1\x00\x00", 5 },              // jmp 0x40D620
+        { blurFlagLevel,  "\x75\x18\x8B\x4B\x08", 5 },               // jne 0x572896 / mov ecx,[ebx+8]
+        { blurAmount,     "\x8B\x8B\x34\x02\x00\x00\xD9\x44\x24\x10", 10 },   // mov ecx,[ebx+0x234] / fld dword ptr [esp+0x10]
+        { rampageTopSpd,  "\x66\x66\xE6\x3E", 4 },                   // dd 0.45f
+        { fnBrainTargets, "\x83\xEC\x14\x53\x55\x8B\xE9\x56", 8 },   // sub esp,0x14 / push ebx/ebp / mov ebp,ecx / push esi
         { 0x4E668E,       "\xE8\xDD\xB9\x10\x00", 5 },               // call 0x5F2070 (x2)
         { 0x4E68FB,       "\xE8\x70\xB7\x10\x00", 5 },
         { fnKinPose,      "\x8B\x41\x6C\x8B\x88\x74\x01\x00\x00", 9 },   // mov eax,[ecx+0x6C] / mov ecx,[eax+0x174]
@@ -253,6 +286,12 @@ struct Config {
     float speedFov = 12.0f;              // degrees added to the camera's field of view at speed (0 = off)
     float speedFovMin = 11.0f;           // speed (units/s) where it starts (11 ~ 25 mph)
     float speedFovMax = 45.0f;           // speed where it's full (45 ~ 100 mph)
+    float speedBlur = 0.35f;             // motion blur at speed: strength at full (0 = off; the game's boost blur tops out at 0.7)
+    float speedBlurMin = 30.0f;          //   speed where it starts
+    float speedBlurMax = 70.0f;          //   speed where it's full
+    float speedShake = 0.4f;             // camera shake at speed: degrees at full (0 = off)
+    float speedShakeMin = 40.0f;         //   speed where it starts
+    float speedShakeMax = 70.0f;         //   speed where it's full
     int   hazardHits = 1;                // moving track hazards (the graveyard ghoul's hands) throw cars
     float hazardMinSpeed = 50.0f;        // a part must move at least this fast (units/s) to hit
     float hazardReach = 3.0f;            // a part hits within this many times its size (takes in the long fingers, which have no box)
@@ -270,6 +309,25 @@ struct Config {
     float aiStartBoost = 50.0f;          // % chance each AI car gets the start boost at GO (game: never)
     int   aiAreaWeaponLimit = 4;         // area weapons the AI holds back while this many are out (game: 2)
     float boostMeterSpeed = 1.6f;        // the start-boost dial runs this many times as fast (1 = original)
+    int   rampageSpread = 1;             // Rampage: AI cars start spread over the whole track
+    int   rampageFlee = 1;               // Rampage: AI cars run from the player
+    float rampageSpeed = 1.0f;           //   their target speeds x this all the time
+    int   sparkStreaks = 1;              // dotted sparks (car hits) drawn as streaks
+    float sparkLength = 0.5f;            //   a streak's length: seconds of the spark's travel (game: 0.25)
+    float sparkWidth = 4.0f;             //   the switched sparks' width x this
+    float sparkVary = 0.6f;              //   each streak spark's length and width x 1 +- up to this
+    float sparkFloor = 0.6f;             //   no collision sparks from the road under the car (jumps, ramps): 1 = all
+    float sparkRate = 120.0f;            //   at most this many extras a second
+    int   sparkCount = 3;                //   extra sparks thrown with each one the game throws
+    float sparkSpread = 0.5f;            //   how far apart they scatter (x the spark's speed)
+    float sparkUp = 1.0f;                //   how hard they're thrown upward (x the spark's speed)
+    float sparkHot = 1.0f;               //   how far sparks can burn toward white-hot (0 = game colours)
+    float rampageTopSpeed = 1.0f;        // Rampage AI cars' top speed, x the player's (game: 0.45)
+    float rampageFleeRange = 60.0f;      //   within this distance (units)
+    float rampageFleeSpeed = 1.4f;       //   target speed x this when the player is right on them
+    float rampageMinDist = 250.0f;       //   AI cars start at least this far from you, when there's room
+    float rampageBehind = 0.4f;          //   a spot behind you counts as this x as far
+    float rampageDodge = 0.3f;           //   steer up to this much of the road's width away from the player
     int   gridLayout = 1;                // start in a grid, as in the trailer (0 = the game's single file)
     int   gridColumns = 4;               // cars side by side in a row
     float gridWidth = 7.0f;              // between neighbouring cars in a row (units)
@@ -345,6 +403,17 @@ static const char kIniText[] =
     "speedFov=12\n"
     "speedFovMin=11\n"
     "speedFovMax=45\n"
+    "; motion blur at high speed (the game's own, which it otherwise only shows when a boost widens\n"
+    ";   the view; needs post-processing on): strength at full speed, 0-1 (0 = off), building up\n"
+    ";   from speedBlurMin to speedBlurMax (units per second)\n"
+    "speedBlur=0.35\n"
+    "speedBlurMin=30\n"
+    "speedBlurMax=70\n"
+    "; shake the race camera at high speed: how far it turns (degrees) at full shake (0 = off),\n"
+    ";   building up from speedShakeMin to speedShakeMax (units per second)\n"
+    "speedShake=0.4\n"
+    "speedShakeMin=40\n"
+    "speedShakeMax=70\n"
     "; --- hazards ---\n"
     "; moving track hazards (the ghoul's hands on the graveyard track) throw cars off the track: a car\n"
     ";   within hazardReach times a moving part's size, while the part moves faster than\n"
@@ -371,7 +440,7 @@ static const char kIniText[] =
     "; give the graveyard gate's panels their collision where they are (1) or as the game has it (0)\n"
     "hazardGateFix=1\n"
     "; --- starting grid ---\n"
-    "; start in a grid, as in the trailer (1), or in single file (0); gridColumns: cars side by\n"
+    "; races start in a grid, as in the trailer (1), or in single file (0); gridColumns: cars side by\n"
     ";   side; gridWidth: between them (units)\n"
     "gridLayout=1\n"
     "gridColumns=4\n"
@@ -392,7 +461,45 @@ static const char kIniText[] =
     "; the AI holds back area weapons (ice, EMP, airstrike, smoke...) while this many are out [2]\n"
     "aiAreaWeaponLimit=4\n"
     "; % chance each AI car gets the start boost at GO, as if it hit the green [never]\n"
-    "aiStartBoost=50\n";
+    "aiStartBoost=50\n"
+    "; --- sparks ---\n"
+    "; draw the dotted sparks (car-on-car hits) as streaks like the other sparks (0 = original);\n"
+    ";   sparkLength: how long every streak is, in seconds of the spark's flight [0.25];\n"
+    ";   sparkWidth: the switched sparks' width x this\n"
+    "sparkStreaks=1\n"
+    "sparkLength=0.5\n"
+    "sparkWidth=4\n"
+    "; each streak spark's length and width vary by up to this (0.6 = 40% to 160%; 0 = all the same),\n"
+    ";   and sparkHot: how far some burn toward white-hot (0 = the game's colours, 1 = a few near white)\n"
+    "sparkVary=0.6\n"
+    "sparkHot=1\n"
+    "; collision sparks only from walls and cars, not the road under you (landing jumps, ramps):\n"
+    ";   a hit more than this much along your car's up is the road (1 = sparks from everything)\n"
+    "sparkFloor=0.6\n"
+    "; extra sparks thrown with each car-hit spark (the game throws only 1-2 a hit; 0 = none), at most\n"
+    ";   sparkRate a second; how far they scatter and how hard they shoot upward (x the spark's speed)\n"
+    "sparkCount=3\n"
+    "sparkRate=120\n"
+    "sparkSpread=0.5\n"
+    "sparkUp=1\n"
+    "; --- Rampage ---\n"
+    "; AI cars start spread over the whole track instead of on the grid (1)\n"
+    "rampageSpread=1\n"
+    "; ...at least this far from you when there's room, and a spot behind you counts as\n"
+    ";   rampageBehind x as far, so they start ahead of you and you don't just turn round\n"
+    "rampageMinDist=250\n"
+    "rampageBehind=0.4\n"
+    "; AI cars run from you when you're within rampageFleeRange: up to rampageFleeSpeed x their\n"
+    ";   speed and rampageDodge of the road's width to the side away from you (0 = original)\n"
+    "rampageFlee=1\n"
+    "; Rampage AI cars' top speed, as a share of yours: the game gives them 0.45 (under half), so\n"
+    ";   they were easy to catch\n"
+    "rampageTopSpeed=1\n"
+    "; AI target speeds x this in Rampage, all the time (corners too)\n"
+    "rampageSpeed=1\n"
+    "rampageFleeRange=60\n"
+    "rampageFleeSpeed=1.4\n"
+    "rampageDodge=0.3\n";
 
 static void LoadConfig() {
     char path[MAX_PATH]; snprintf(path, sizeof(path), "%sHWBTMod.ini", g_asiDir);
@@ -433,6 +540,12 @@ static void LoadConfig() {
         else if (!_stricmp(key, "speedFov"))           g_cfg.speedFov = (float)atof(val);
         else if (!_stricmp(key, "speedFovMin"))        g_cfg.speedFovMin = (float)atof(val);
         else if (!_stricmp(key, "speedFovMax"))        g_cfg.speedFovMax = (float)atof(val);
+        else if (!_stricmp(key, "speedBlur"))          g_cfg.speedBlur = (float)atof(val);
+        else if (!_stricmp(key, "speedBlurMin"))       g_cfg.speedBlurMin = (float)atof(val);
+        else if (!_stricmp(key, "speedBlurMax"))       g_cfg.speedBlurMax = (float)atof(val);
+        else if (!_stricmp(key, "speedShake"))         g_cfg.speedShake = (float)atof(val);
+        else if (!_stricmp(key, "speedShakeMin"))      g_cfg.speedShakeMin = (float)atof(val);
+        else if (!_stricmp(key, "speedShakeMax"))      g_cfg.speedShakeMax = (float)atof(val);
         else if (!_stricmp(key, "hazardHits"))         g_cfg.hazardHits = n;
         else if (!_stricmp(key, "hazardMinSpeed"))     g_cfg.hazardMinSpeed = (float)atof(val);
         else if (!_stricmp(key, "hazardReach"))        g_cfg.hazardReach = (float)atof(val);
@@ -448,6 +561,25 @@ static void LoadConfig() {
         else if (!_stricmp(key, "aiStartBoost"))       g_cfg.aiStartBoost = (float)atof(val);
         else if (!_stricmp(key, "aiAreaWeaponLimit"))  g_cfg.aiAreaWeaponLimit = n;
         else if (!_stricmp(key, "boostMeterSpeed"))    g_cfg.boostMeterSpeed = (float)atof(val);
+        else if (!_stricmp(key, "rampageSpread"))      g_cfg.rampageSpread = n;
+        else if (!_stricmp(key, "rampageFlee"))        g_cfg.rampageFlee = n;
+        else if (!_stricmp(key, "sparkStreaks"))       g_cfg.sparkStreaks = n;
+        else if (!_stricmp(key, "sparkLength"))        g_cfg.sparkLength = (float)atof(val);
+        else if (!_stricmp(key, "sparkWidth"))         g_cfg.sparkWidth = (float)atof(val);
+        else if (!_stricmp(key, "sparkVary"))          g_cfg.sparkVary = (float)atof(val);
+        else if (!_stricmp(key, "sparkFloor"))         g_cfg.sparkFloor = (float)atof(val);
+        else if (!_stricmp(key, "sparkRate"))          g_cfg.sparkRate = (float)atof(val);
+        else if (!_stricmp(key, "sparkCount"))         g_cfg.sparkCount = n;
+        else if (!_stricmp(key, "sparkSpread"))        g_cfg.sparkSpread = (float)atof(val);
+        else if (!_stricmp(key, "sparkUp"))            g_cfg.sparkUp = (float)atof(val);
+        else if (!_stricmp(key, "sparkHot"))           g_cfg.sparkHot = (float)atof(val);
+        else if (!_stricmp(key, "rampageTopSpeed"))    g_cfg.rampageTopSpeed = (float)atof(val);
+        else if (!_stricmp(key, "rampageSpeed"))       g_cfg.rampageSpeed = (float)atof(val);
+        else if (!_stricmp(key, "rampageFleeRange"))   g_cfg.rampageFleeRange = (float)atof(val);
+        else if (!_stricmp(key, "rampageFleeSpeed"))   g_cfg.rampageFleeSpeed = (float)atof(val);
+        else if (!_stricmp(key, "rampageMinDist"))     g_cfg.rampageMinDist = (float)atof(val);
+        else if (!_stricmp(key, "rampageBehind"))      g_cfg.rampageBehind = (float)atof(val);
+        else if (!_stricmp(key, "rampageDodge"))       g_cfg.rampageDodge = (float)atof(val);
         else if (!_stricmp(key, "gridLayout"))         g_cfg.gridLayout = n;
         else if (!_stricmp(key, "gridColumns"))        g_cfg.gridColumns = n;
         else if (!_stricmp(key, "gridRowGap"))         g_cfg.gridRowGap = (float)atof(val);
@@ -1144,8 +1276,10 @@ static void __cdecl HkRender3D() {
 // flush 0x54DA00): put the step state back. The renderer queues draws and
 // reads many matrices only when it flushes, so the blend has to stay in until
 // then, not just through the 3D pass.
+static void CamShakeUndo();
 static void __attribute__((thiscall)) HkFrameEnd(void* renderer) {
     reinterpret_cast<Limiter_t>(hot::fnFrameEnd)(renderer);
+    CamShakeUndo();                                // (before the check below: a shaken camera isn't "moved by the pass")
     if (!g_inRender) return;                       // no blend this frame
     g_inRender = false;
     for (Track& t : g_tr) {
@@ -1428,6 +1562,106 @@ asm(".text\n"
 // Each camera keeps its own smoothed speed: the game sets up more than one
 // camera a frame, and a shared value was pulled to and fro between the moving
 // race camera and the still ones, so the field of view jumped every frame.
+// Speed blur. The game's post-processing has a "speed ghosting" blur: every
+// frame a small copy of the scene goes into a 3-frame history (0x6A85E0), and
+// when the post-process flag g_MotionBlur (+0x31C) is on, the three are
+// averaged and Gaussian-blurred (0x6A8F08) and the final pass mixes that in by
+// g_MotionBlurAmount. The game works the amount out from the field of view -
+// (fov in radians - 1.3) x 2, 0 to 0.7 - so it only showed when a boost widened
+// the view past about 75 degrees, and a level's own settings can switch the
+// flag off (0x5726C0). So:
+//  - the level's g_MotionBlur no longer overrides the flag (0x57287C: always
+//    skipped; it starts at 1)
+//  - just before the amount goes to the shader (0x575F65), the shader's own
+//    g_MotionBlur is set to 1 and the amount raised to the speed blur: up to
+//    speedBlur, from speedBlurMin to speedBlurMax (the player's speed, as the
+//    speed FOV sees it), whichever is more.
+// Not a directional blur: the whole frame trails a little. The car mostly
+// stays put on screen, so it's the road and the surroundings that smear.
+static float g_blurSpeed = 0.0f; static DWORD g_blurSpeedMs = 0;
+static float g_blurMax = 0.0f; static LONG g_blurOn = 0; static bool g_blurLogged = false;
+typedef HRESULT (__stdcall *EffSetFloat_t)(void*, const char*, float);
+extern "C" void __cdecl SpeedBlur(float* amount, BYTE* pp) {
+    float game = *amount, ours = 0.0f;
+    if (GetTickCount() - g_blurSpeedMs < 500) {                 // (a race camera on the player's car just now)
+        float span = g_cfg.speedBlurMax - g_cfg.speedBlurMin;
+        float x = span > 0.0f ? (g_blurSpeed - g_cfg.speedBlurMin) / span : 0.0f;
+        if (x < 0.0f) x = 0.0f; else if (x > 1.0f) x = 1.0f;
+        ours = g_cfg.speedBlur * x * x * (3.0f - 2.0f * x);     // smoothstep
+    }
+    BYTE* fx = pp ? *reinterpret_cast<BYTE**>(pp + 0x234) : nullptr;
+    void* eff = fx ? *reinterpret_cast<void**>(fx + 0x1C) : nullptr;   // the ID3DXEffect
+    if (eff) {
+        void** vt = *reinterpret_cast<void***>(eff);
+        reinterpret_cast<EffSetFloat_t>(vt[0x78 / 4])(eff, "g_MotionBlur", 1.0f);   // (no such parameter: does nothing)
+    }
+    if (ours > game) *amount = ours;
+    if (ours > 0.0f) {                                          // (for the log: once, ~10 s into the first speed blur)
+        if (*amount > g_blurMax) g_blurMax = *amount;
+        if (!g_blurLogged && ++g_blurOn == 600) {
+            g_blurLogged = true;
+            Logf("speed blur: on in a race; strongest so far %.2f (game's own now %.2f)\n", g_blurMax, game);
+        }
+    }
+}
+extern "C" void SpeedBlurStub();
+asm(".text\n"
+    ".globl _SpeedBlurStub\n_SpeedBlurStub:\n"   // call from 0x575F65 (replaces mov ecx,[ebx+0x234]); ebx = post-process, the amount at the caller's [esp+0x10]
+    "    pushal\n"
+    "    leal 0x34(%esp), %eax\n"                // 0x10 + 4 (return address) + 0x20 (pushal)
+    "    pushl %ebx\n"
+    "    pushl %eax\n"
+    "    call _SpeedBlur\n"
+    "    addl $8, %esp\n"
+    "    popal\n"
+    "    movl 0x234(%ebx), %ecx\n"
+    "    ret\n");
+
+// Speed shake. Camera::Apply builds the view from the camera's matrix right
+// after it sets the field of view, so the shake goes into the camera's matrix
+// here and comes out again at the end of the frame's drawing (HkFrameEnd),
+// before the step state goes back: the game never sees it. It's a small turn
+// (yaw and pitch, up to speedShake degrees), not a move: moving a camera that
+// close to the car slid the car about on screen against a still background,
+// which read as jitter. Strength builds from speedShakeMin to speedShakeMax;
+// a few sine waves of 1.7-5 Hz that never line up make the rumble.
+struct CamShakeSave { BYTE* cam; float orig[16], shaken[16]; };
+static CamShakeSave g_shake[4];
+static int g_shakeN = 0;
+static LONG g_shakeDone = 0, g_shakeOutside = 0, g_shakeFrames = 0; static bool g_shakeLogged = false;
+static void CamShake(BYTE* cam, float speed, double t) {
+    float span = g_cfg.speedShakeMax - g_cfg.speedShakeMin;
+    float x = span > 0.0f ? (speed - g_cfg.speedShakeMin) / span : (speed >= g_cfg.speedShakeMin ? 1.0f : 0.0f);
+    if (x <= 0.0f || *reinterpret_cast<volatile BYTE*>(hot::worldFrozen)) return;   // (not while paused)
+    if (x > 1.0f) x = 1.0f;
+    float a = g_cfg.speedShake * x * x * (3.14159265f / 180.0f);   // radians
+    float* m = reinterpret_cast<float*>(cam + 0x10);
+    CamShakeSave* e = nullptr;                                  // (the same camera twice in a frame: from its own matrix)
+    for (int i = 0; i < g_shakeN; i++) if (g_shake[i].cam == cam) { e = &g_shake[i]; break; }
+    if (e) { if (memcmp(m, e->shaken, 64)) return; memcpy(m, e->orig, 64); }
+    else { if (g_shakeN >= 4) return; e = &g_shake[g_shakeN++]; e->cam = cam; memcpy(e->orig, m, 64); }
+    float yaw   = a * (0.5f * (float)sin(t * 10.7) + 0.3f * (float)sin(t * 18.2 + 1.3) + 0.2f * (float)sin(t * 28.9 + 4.0));
+    float pitch = a * (0.5f * (float)sin(t * 12.3 + 0.7) + 0.3f * (float)sin(t * 20.6 + 2.1) + 0.2f * (float)sin(t * 31.4 + 5.2));
+    // small-angle turn of the rows (0 right, 1 up, 2 forward): still square to
+    // within angle^2 (under 1e-4), and it's put back after the frame anyway
+    for (int k = 0; k < 3; k++) {
+        float r = m[k], u = m[4 + k], f = m[8 + k];
+        m[k] = r - f * yaw; m[4 + k] = u - f * pitch; m[8 + k] = f + r * yaw + u * pitch;
+    }
+    memcpy(e->shaken, m, 64);
+    g_shakeDone++;
+}
+static void CamShakeUndo() {
+    for (int i = 0; i < g_shakeN; i++) {
+        float* m = reinterpret_cast<float*>(g_shake[i].cam + 0x10);
+        if (!memcmp(m, g_shake[i].shaken, 64)) memcpy(m, g_shake[i].orig, 64);   // (unless something else moved it since)
+    }
+    g_shakeN = 0;
+    if ((g_shakeDone || g_shakeOutside) && !g_shakeLogged && ++g_shakeFrames >= 600) {   // (once, ~10 s into the first shaking)
+        g_shakeLogged = true;
+        Logf("camera shake: %ld shakes in 600 frames, %ld camera setups outside drawing skipped\n", g_shakeDone, g_shakeOutside);
+    }
+}
 struct CamFov { BYTE* cam; float speed; LONGLONG qpc; float fovPrev, fovCur; LONG fovStep; };
 static CamFov g_camFov[8];
 static float g_maxCamSpeed = 0.0f;           // for the log (calibration)
@@ -1493,6 +1727,11 @@ extern "C" void __cdecl HkSetFov(float fov) {
     if (x < 0.0f) x = 0.0f; else if (x > 1.0f) x = 1.0f;
     x = x * x * (3.0f - 2.0f * x);                              // smoothstep
     reinterpret_cast<void (__cdecl *)(float)>(hot::fnSetFov)(fov + g_cfg.speedFov * x);
+    if (car && reinterpret_cast<DWORD>(car->vt) == 0x8A0384) { g_blurSpeed = c->speed; g_blurSpeedMs = GetTickCount(); }
+    if (car && g_cfg.speedShake > 0.0f) {
+        if (g_inRender) CamShake(g_applyCam, c->speed, q.QuadPart / (double)qpf);
+        else g_shakeOutside++;
+    }
 }
 
 // Frame cap: wait for our next frame time, then let the game's limiter measure
@@ -2410,7 +2649,20 @@ static const BYTE* FindStartAP(int idx) {
     return nullptr;
 }
 typedef void (__attribute__((thiscall)) *PlaceCar_t)(BYTE*, const float*, const float*, int, float, int);
+static int GameMode() {
+    BYTE* ev = *reinterpret_cast<BYTE**>(hot::curEvent);
+    return ev ? reinterpret_cast<int (__attribute__((thiscall)) *)(BYTE*)>(hot::fnGameMode)(ev) : -1;
+}
+static bool RampageSpawn(BYTE* car, const float* pos, const float* mat, int a3, float a4, int a5);
+static void SparkSetup();
 static void __attribute__((thiscall)) HkGridPlace(BYTE* car, const float* pos, const float* mat, int a3, float a4, int a5) {
+    SparkSetup();
+    int mode = GameMode();
+    if (mode == 7 && g_cfg.rampageSpread && RampageSpawn(car, pos, mat, a3, a4, a5)) return;
+    if (mode != 6 && mode != 8 && mode != 10) {                 // the grid is for races (race, eliminator, tournament)
+        reinterpret_cast<PlaceCar_t>(hot::fnPlaceCar)(car, pos, mat, a3, a4, a5);
+        return;
+    }
     const BYTE* ap = reinterpret_cast<const BYTE*>(pos) - 0x40;
     int slot = *reinterpret_cast<const short*>(ap + 0x52);
     const BYTE* ap0 = FindStartAP(0);
@@ -2448,11 +2700,389 @@ static void __attribute__((thiscall)) HkGridPlace(BYTE* car, const float* pos, c
     Logf("grid: slot %d -> row %d column %d (%.1f %.1f %.1f)\n", slot, row, col, np[0], np[1], np[2]);
     reinterpret_cast<PlaceCar_t>(hot::fnPlaceCar)(car, np, reinterpret_cast<const float*>(front + 0x10), a3, a4, a5);
 }
+// ---------------------------------------------------------------------------
+// Rampage (game mode 7: hunt down the opponents before the time runs out). The
+// game starts it on the race grid and its AI simply races the track, so it was
+// a walkover. The mod spreads the AI cars over the whole track at the start and
+// makes them run from the player.
+// Spawn points: the track's reset points (action points of type 0xB4, placed on
+// the road and facing along it) and points every 30 units along the track's
+// lines (the ones the AI drives, 0x9680D0). From those, each AI car gets the one
+// farthest from the player and from the cars already placed, with spots behind
+// the player counted as nearer (rampageBehind) and spots within rampageMinDist
+// of them left till last. The player keeps the start.
+// Fleeing: the AI brain refills each car's target points (0x648B50; one brain a
+// frame, in turn). After it, an AI car with the player within rampageFleeRange
+// gets its target speeds raised by rampageFleeSpeed, and its target points moved
+// across the road (up to rampageDodge of the road's width) away from the player.
+// Turning round isn't possible: the AI's routes only go forward.
+// ---------------------------------------------------------------------------
+struct SpawnPt { float m[16]; };
+static SpawnPt g_spawns[1024];
+static int g_spawnN = 0, g_spawnUsed = 0;
+static DWORD g_spawnMs = 0;
+static void AddSpawn(const float* pos, const float* fwd) {
+    if (g_spawnN >= 1024) return;
+    float f[3] = { fwd[0], 0.0f, fwd[2] };
+    float l = sqrtf(Dot3(f, f));
+    if (l < 0.01f) return;
+    f[0] /= l; f[2] /= l;
+    float* m = g_spawns[g_spawnN++].m;
+    memset(m, 0, 64);
+    m[0] = f[2]; m[2] = -f[0];                                  // right
+    m[5] = 1.0f;                                                // up
+    m[8] = f[0]; m[10] = f[2];                                  // forward (row 2: the heading 0x63E750 uses)
+    m[12] = pos[0]; m[13] = pos[1] + 0.5f; m[14] = pos[2]; m[15] = 1.0f;
+}
+static void CollectSpawns() {
+    g_spawnN = 0;
+    const DWORD lists[2] = { hot::apUserList, hot::apList };
+    int nAP = 0, types[8][2] = {}, nt = 0;                      // (type histogram, for the log)
+    for (DWORD list : lists) {
+        BYTE* const* aps = *reinterpret_cast<BYTE* const* const*>(list);
+        int na = *reinterpret_cast<const int*>(list + 4);
+        for (int i = 0; aps && i < na && i < 4096; i++) {
+            const BYTE* ap = aps[i];
+            if (!ap) continue;
+            int t = *reinterpret_cast<const short*>(ap + 0x50);
+            int k = 0; while (k < nt && types[k][0] != t) k++;
+            if (k < nt) types[k][1]++; else if (nt < 8) { types[nt][0] = t; types[nt][1] = 1; nt++; }
+            if (t != 0xB4) continue;
+            const float* q = reinterpret_cast<const float*>(ap + 0x40);
+            bool dup = false;                                   // (an AP in both lists)
+            for (int j = 0; j < g_spawnN && !dup; j++) {
+                const float* o = g_spawns[j].m + 12;
+                dup = fabsf(o[0] - q[0]) < 1.0f && fabsf(o[2] - q[2]) < 1.0f;
+            }
+            if (!dup) { AddSpawn(q, reinterpret_cast<const float*>(ap + 0x30)); nAP = g_spawnN; }
+        }
+    }
+    // The track's own lines (the AI drives these; loaded with the level, before
+    // the grid): a spot every kSpotGap units along each. A line's nodes run one
+    // way; which way the cars go comes from the reset points next to it (they
+    // face along the track), else from its start junction.
+    const float kSpotGap = 30.0f;
+    int nLines = *reinterpret_cast<const int*>(hot::lineCount), nUsed = 0, nFlagged = 0, nRev = 0;
+    const BYTE* lines = *reinterpret_cast<BYTE* const*>(hot::lineTable);
+    BYTE* const* juncs = *reinterpret_cast<BYTE* const* const*>(hot::juncTable);
+    int nJuncs = *reinterpret_cast<const int*>(hot::juncCount);
+    for (int i = 0; lines && i < nLines && i < 1024; i++) {
+        const BYTE* L = lines + i * 0x74;
+        if (L[0x4A]) { nFlagged++; continue; }                  // (skipped by the game's own nearest-line search)
+        int fmt = *reinterpret_cast<const int*>(L + 0x54);
+        int stride = fmt == 1 ? 0x30 : fmt == 2 ? 0x40 : 0x10;
+        int nn = *reinterpret_cast<const short*>(L + 0x3E);
+        const BYTE* nodes = *reinterpret_cast<BYTE* const*>(L + 0x60);
+        if (!nodes || nn < 2 || nn > 100000) continue;
+        auto node = [&](int k) { return reinterpret_cast<const float*>(nodes + k * stride); };
+        // which way: vote with the reset points within 40 units of a node
+        float vote = 0.0f;
+        for (int r = 0; r < nAP; r++) {
+            const float* rm = g_spawns[r].m;
+            for (int k = 0; k + 1 < nn; k++) {
+                const float* a = node(k); const float* b = node(k + 1);
+                float dx = a[0] - rm[12], dz = a[2] - rm[14];
+                if (dx * dx + dz * dz > 40.0f * 40.0f) continue;
+                vote += (b[0] - a[0]) * rm[8] + (b[2] - a[2]) * rm[10];
+                break;
+            }
+        }
+        bool rev = false;
+        if (vote != 0.0f) rev = vote < 0.0f;
+        else {                                                  // the start junction: > 0 = entered at node 0
+            int j = *reinterpret_cast<const short*>(L + 0x34);
+            const BYTE* J = (juncs && j >= 0 && j < nJuncs) ? juncs[j] : nullptr;
+            if (J) {
+                int nc = *reinterpret_cast<const short*>(J + 0x42);
+                for (int c = 0; c < nc && c < 8; c++)
+                    if (*reinterpret_cast<const short*>(J + 0x1C + c * 2) == i) {
+                        rev = *reinterpret_cast<const short*>(J + 0x2C + c * 2) <= 0; break;
+                    }
+            }
+        }
+        nUsed++; if (rev) nRev++;
+        float run = 0.0f;                                       // (the first one kSpotGap in: not at the junction)
+        for (int k = 0; k + 1 < nn; k++) {
+            const float* a = node(k); const float* b = node(k + 1);
+            float d[3] = { b[0] - a[0], b[1] - a[1], b[2] - a[2] };
+            run += sqrtf(Dot3(d, d));
+            if (run < kSpotGap) continue;
+            run = 0.0f;
+            bool dupe = false;                                  // (parallel lanes: one spot)
+            for (int j = 0; j < g_spawnN && !dupe; j++) {
+                const float* o = g_spawns[j].m + 12;
+                dupe = fabsf(o[0] - a[0]) < 10.0f && fabsf(o[2] - a[2]) < 10.0f && fabsf(o[1] - a[1]) < 10.0f;
+            }
+            if (dupe) continue;
+            if (rev) { d[0] = -d[0]; d[2] = -d[2]; }
+            AddSpawn(a, d);
+        }
+    }
+    char hist[160] = ""; int hl = 0;
+    for (int k = 0; k < nt && hl < 140; k++) hl += snprintf(hist + hl, sizeof(hist) - hl, " %X:%d", types[k][0], types[k][1]);
+    Logf("rampage: %d spot(s): %d reset point(s), %d along %d of %d track line(s) (%d flagged, %d reversed; action point types%s)\n",
+         g_spawnN, nAP, g_spawnN - nAP, nUsed, nLines, nFlagged, nRev, hist);
+}
+static bool RampageSpawn(BYTE* car, const float*, const float*, int a3, float a4, int a5) {
+    DWORD vt = *reinterpret_cast<DWORD*>(car);
+    if (vt != 0x8A0144 && vt != 0x8A3FA4) return false;         // the player keeps the start
+    DWORD now = GetTickCount();
+    if (now - g_spawnMs > 3000) { CollectSpawns(); g_spawnUsed = 0; }   // a new start: the points afresh
+    g_spawnMs = now;
+    if (!g_spawnN) return false;
+    // Where the player is: the start (they keep it), facing along it
+    float ref[3] = { 0, 0, 0 }, fwd[3] = { 0, 0, 0 }; bool haveRef = false;
+    if (const BYTE* start = FindStartAP(0)) { memcpy(ref, start + 0x40, 12); memcpy(fwd, start + 0x30, 12); haveRef = true; }
+    fwd[1] = 0.0f;
+    { float l = sqrtf(Dot3(fwd, fwd)); if (l > 0.01f) { fwd[0] /= l; fwd[2] /= l; } else fwd[0] = fwd[2] = 0.0f; }
+    // Each AI car: the spot farthest from the player and from the AI cars placed
+    // so far. Spots behind the player count as closer to them (x rampageBehind),
+    // and spots nearer the player than rampageMinDist are used only if nothing
+    // else is left.
+    static float placed[16][3];
+    float bestD = -1.0f; int best = -1;
+    for (int pass = 0; pass < 2 && best < 0; pass++) {
+        for (int i = 0; i < g_spawnN; i++) {
+            const float* q = g_spawns[i].m + 12;
+            bool taken = false;
+            for (int j = 0; j < g_spawnUsed && j < 16 && !taken; j++)
+                taken = fabsf(q[0] - placed[j][0]) < 1.0f && fabsf(q[2] - placed[j][2]) < 1.0f;
+            if (taken) continue;
+            float dmin = 1e30f;
+            if (haveRef) {
+                float d[3] = { q[0] - ref[0], q[1] - ref[1], q[2] - ref[2] };
+                dmin = sqrtf(Dot3(d, d));
+                if (d[0] * fwd[0] + d[2] * fwd[2] < 0.0f) dmin *= g_cfg.rampageBehind;
+                if (pass == 0 && dmin < g_cfg.rampageMinDist) continue;
+            }
+            for (int j = 0; j < g_spawnUsed && j < 16; j++) {
+                float d[3] = { q[0] - placed[j][0], q[1] - placed[j][1], q[2] - placed[j][2] };
+                float dd = sqrtf(Dot3(d, d)); if (dd < dmin) dmin = dd;
+            }
+            if (dmin > bestD) { bestD = dmin; best = i; }
+        }
+    }
+    if (best < 0) return false;
+    const float* m = g_spawns[best].m;
+    if (g_spawnUsed < 16) memcpy(placed[g_spawnUsed], m + 12, 12);
+    g_spawnUsed++;
+    Logf("rampage: AI car %p spawned at (%.1f %.1f %.1f), %.0f from you/the nearest car (of %d spots)\n",
+         car, m[12], m[13], m[14], bestD, g_spawnN);
+    reinterpret_cast<PlaceCar_t>(hot::fnPlaceCar)(car, m + 12, m, a3, a4, a5);
+    return true;
+}
+typedef void (__attribute__((thiscall)) *Brain_t)(BYTE*);
+static int g_rampageMode = -2; static DWORD g_rampageModeMs = 0;
+static void __attribute__((thiscall)) HkBrainTargets(BYTE* brain) {
+    reinterpret_cast<Brain_t>(hot::fnBrainTargets)(brain);
+    DWORD now = GetTickCount();
+    if (now - g_rampageModeMs > 1000) { g_rampageMode = GameMode(); g_rampageModeMs = now; }   // (once a second)
+    if (g_rampageMode != 7) return;
+    BYTE* car = *reinterpret_cast<BYTE**>(brain + 0xC);
+    if (!car || *reinterpret_cast<DWORD*>(car) != 0x8A0144) return;    // AI cars only
+    BYTE* player = nullptr;                                     // the player's car (GSPlayerRaceCar_c)
+    for (int i = 0; i < 8 && !player; i++) {
+        BYTE* r = reinterpret_cast<BYTE* const*>(0x953C90)[i];
+        BYTE* c = r ? *reinterpret_cast<BYTE**>(r + 0x10) : nullptr;
+        if (c && *reinterpret_cast<DWORD*>(c) == 0x8A0384) player = c;
+    }
+    if (!player) return;
+    const float* cp = reinterpret_cast<const float*>(car + 0x10) + 12;
+    const float* pp = reinterpret_cast<const float*>(player + 0x10) + 12;
+    float rel[3] = { cp[0] - pp[0], 0.0f, cp[2] - pp[2] };     // from the player to the car
+    float dist = sqrtf(Dot3(rel, rel));
+    int n = *reinterpret_cast<int*>(car + 0xC60);
+    BYTE* pts = *reinterpret_cast<BYTE**>(car + 0xC64);
+    float* spd = *reinterpret_cast<float**>(car + 0xC6C);
+    if (n <= 0 || n > 256 || !pts) return;
+    if (spd && g_cfg.rampageSpeed != 1.0f)                      // all the time (1 = as the game drives them)
+        for (int i = 0; i < n; i++) spd[i] *= g_cfg.rampageSpeed;
+    if (dist > g_cfg.rampageFleeRange || dist < 0.01f) return;
+    float close = 1.0f - dist / g_cfg.rampageFleeRange;         // 0 at the edge of range, 1 on top
+    for (int i = 0; i < n; i++) {
+        float* tp = reinterpret_cast<float*>(pts + i * 0x1C);    // target xyz; +0x10: road width vector (right - left)
+        const float* side = tp + 4;
+        float w2 = side[0] * side[0] + side[2] * side[2];
+        if (w2 > 0.01f && g_cfg.rampageDodge > 0.0f) {
+            float away = (rel[0] * side[0] + rel[2] * side[2]) >= 0.0f ? 1.0f : -1.0f;   // the side of the road away from the player
+            float k = away * g_cfg.rampageDodge * close;
+            tp[0] += side[0] * k; tp[2] += side[2] * k;
+        }
+        if (spd) spd[i] *= 1.0f + (g_cfg.rampageFleeSpeed - 1.0f) * close;
+    }
+}
+static void InstallSpeedBlur() {
+    if (g_cfg.speedBlur <= 0.0f) return;
+    if (!g_cfg.interpolate) { Logf("speed blur: needs interpolate=1 (it uses the speed FOV's car speed)\n"); return; }
+    const BYTE jmp = 0xEB;
+    if (!PatchCall(hot::blurAmount, reinterpret_cast<void*>(&SpeedBlurStub), 6) ||
+        !PatchBytes(hot::blurFlagLevel, &jmp, 1)) { Logf("speed blur: patch FAILED\n"); return; }
+    Logf("speed blur: up to %.2f, from %.0f to %.0f units/s\n", g_cfg.speedBlur, g_cfg.speedBlurMin, g_cfg.speedBlurMax);
+}
+static void InstallRampage() {
+    if (g_cfg.rampageTopSpeed > 0.0f && g_cfg.rampageTopSpeed != 0.45f) {
+        if (!PatchBytes(hot::rampageTopSpd, &g_cfg.rampageTopSpeed, 4)) Logf("rampage: top speed patch FAILED\n");
+        else Logf("rampage: AI top speed %.0f%% of yours\n", g_cfg.rampageTopSpeed * 100.0f);
+    }
+    if (!g_cfg.rampageFlee) return;
+    if (!PatchCall(hot::callBrainTargets, reinterpret_cast<void*>(&HkBrainTargets), 5)) { Logf("rampage: patch FAILED\n"); return; }
+    Logf("rampage: AI flees within %.0f (speed x%.2f, dodge %.2f)\n", g_cfg.rampageFleeRange, g_cfg.rampageFleeSpeed, g_cfg.rampageDodge);
+}
+
 static void InstallGrid() {
-    if (!g_cfg.gridLayout) { Logf("grid: original (gridLayout=0)\n"); return; }
+    if (!g_cfg.gridLayout && !g_cfg.rampageSpread && !g_cfg.sparkStreaks) { Logf("grid: original (gridLayout=0)\n"); return; }   // (the hook also sets up the sparks)
     if (!PatchCall(hot::callGridPlace, reinterpret_cast<void*>(&HkGridPlace), 5) ||
         !PatchCall(hot::callGridReset, reinterpret_cast<void*>(&HkGridPlace), 5)) { Logf("grid: patch FAILED\n"); return; }
-    Logf("grid: %d abreast, %.1f apart\n", g_cfg.gridColumns, g_cfg.gridWidth);
+    if (g_cfg.gridLayout) Logf("grid: %d abreast, %.1f apart\n", g_cfg.gridColumns, g_cfg.gridWidth);
+    else Logf("grid: original (gridLayout=0)\n");
+}
+
+// ---------------------------------------------------------------------------
+// Sparks. The game's spark particles (0x563xxx-0x566xxx: 50 types, 650
+// particles) are drawn by type flags (0x5668F9): flag 4 draws each spark as one
+// quad stretched along its velocity (0x5654D0, length P+0x48 = 0.25 s of
+// travel); flag 1 as a chain of up to 8 little squares over just 0.04 s of
+// travel (0x564BE0) - with a width of 0.035, the orange "line of dots" of a
+// car-on-car hit (type 7, flags 1|2|8). Every type with flag 1 is switched to
+// flag 4 here (flag 8, whose history the PC version never sets up, cleared
+// too), made sparkWidth x as wide, and every streak is sparkLength seconds of
+// travel long instead of 0.25 (0x563CB7 reads our value). Done each time a
+// level places its cars, after it has loaded its spark types; a type already
+// switched is left alone.
+// Variety: as each streak spark (a flag-4 type) is born (0x563D23, the end of
+// the spawn 0x563AF0, every field set; ecx = the particle, ebp = its type) its
+// length and width are scaled by a random amount in sparkVary, and a share of
+// them (sparkHot) burn hotter: yellow to near white, full alpha. Colours are 7
+// bits a channel there (P+0x28: A R G B, 0-0x7F).
+// More of them: the game throws only 1-2 sparks a hit. Each car-hit spark (a
+// type switched above; not the wall-scrape sparks, which come every step while
+// scraping) brings sparkCount more of its type with it, sparkRate a second at
+// most, through the game's own spawn (0x566A40: type, position, velocity,
+// gravity), from the same spot, each sent off in its own direction: the first one's velocity, scattered by sparkSpread
+// and thrown upward by sparkUp - the fountain of the intro.
+// ---------------------------------------------------------------------------
+static float g_sparkLength = 0.25f;
+static float Rand01() { return (Rand32() & 0xFFFFFF) / 16777216.0f; }
+typedef void (__cdecl *SparkSpawn_t)(int, const float*, const float*, const float*, float);
+static int g_sparkDepth = 0;
+static DWORD g_sparkSwitched[50];                                // types switched from dots to streaks (car hits): their texture then
+                                                                 // (a slot a later level fills with another type no longer matches)
+static DWORD g_sparkBudgetMs = 0; static float g_sparkBudget = 0.0f;
+extern "C" void __cdecl SparkSpawned(BYTE* P, int type, BYTE* sys) {
+    if (!P || !sys || type < 0 || type >= 50) return;
+    const BYTE* E = sys + 0x1CC3C28 + type * 0x3C;
+    if (!(*reinterpret_cast<const DWORD*>(E + 0x28) & 4)) return;   // streak sparks only (not smoke)
+    bool carHit = g_sparkSwitched[type] && g_sparkSwitched[type] == *reinterpret_cast<const DWORD*>(E);
+    if (g_sparkDepth == 0 && g_cfg.sparkCount > 0 && carHit) {  // (the extras' own births don't bring more)
+        DWORD now = GetTickCount();                             // budget: sparkRate extras a second, a quarter second's worth banked
+        g_sparkBudget += (now - g_sparkBudgetMs) * 0.001f * g_cfg.sparkRate;
+        g_sparkBudgetMs = now;
+        if (g_sparkBudget > g_cfg.sparkRate * 0.25f) g_sparkBudget = g_cfg.sparkRate * 0.25f;
+    }
+    if (g_sparkDepth == 0 && g_cfg.sparkCount > 0 && carHit && g_sparkBudget >= 1.0f) {
+        g_sparkDepth = 1;
+        float pos[3], v0[3], acc[3];
+        memcpy(pos, P + 4, 12); memcpy(v0, P + 0x10, 12); memcpy(acc, P + 0x1C, 12);
+        float sp = sqrtf(Dot3(v0, v0));
+        if (sp < 8.0f) sp = 8.0f;                               // (a light scrape still throws them)
+        for (int i = 0; i < g_cfg.sparkCount && i < 32 && g_sparkBudget >= 1.0f; i++, g_sparkBudget -= 1.0f) {
+            float v[3];
+            float k = 0.5f + Rand01();                          // 0.5 - 1.5 x as fast
+            for (int a = 0; a < 3; a++) v[a] = v0[a] * k + sp * g_cfg.sparkSpread * (2.0f * Rand01() - 1.0f);
+            v[1] += sp * g_cfg.sparkUp * (0.3f + Rand01());
+            reinterpret_cast<SparkSpawn_t>(hot::fnSparkSpawn)(type, pos, v, acc, 0.0f);
+        }
+        g_sparkDepth = 0;
+    }
+    float v = g_cfg.sparkVary;
+    if (v > 0.0f) {
+        float len = 1.0f + v * (2.0f * Rand01() - 1.0f);        // e.g. 0.4 - 1.6 for 0.6
+        float wid = 1.0f + v * (2.0f * Rand01() - 1.0f);
+        *reinterpret_cast<float*>(P + 0x48) *= len;
+        *reinterpret_cast<float*>(P + 0x30) *= wid;
+        *reinterpret_cast<float*>(P + 0x34) *= wid;
+    }
+    if (g_cfg.sparkHot > 0.0f) {
+        float h = Rand01(); h = h * h * g_cfg.sparkHot;         // most a little, a few a lot
+        if (h > 1.0f) h = 1.0f;
+        DWORD c = *reinterpret_cast<DWORD*>(P + 0x28);
+        int r = (c >> 16) & 0x7F, g = (c >> 8) & 0x7F, b = c & 0x7F;
+        r += (int)((0x7F - r) * h); g += (int)((0x7F - g) * h); b += (int)((0x70 - b) * h * 0.8f);
+        if (b < 0) b = 0;
+        *reinterpret_cast<DWORD*>(P + 0x28) = 0x7Fu << 24 | (DWORD)r << 16 | (DWORD)g << 8 | (DWORD)b;
+    }
+}
+extern "C" void SparkSpawnStub();
+asm(".text\n"
+    ".globl _SparkSpawnStub\n_SparkSpawnStub:\n"   // call from 0x563D23 (replaces fld dword ptr [ebx+0x1CB66D8]); ecx = particle, ebp = type, ebx = system
+    "    pushal\n"
+    "    pushl %ebx\n"
+    "    pushl %ebp\n"
+    "    pushl %ecx\n"
+    "    call _SparkSpawned\n"
+    "    addl $12, %esp\n"
+    "    popal\n"
+    "    flds 0x1CB66D8(%ebx)\n"
+    "    ret\n");
+static void SparkSetup() {
+    if (!g_cfg.sparkStreaks) return;
+    BYTE* sys = reinterpret_cast<BYTE* (__cdecl *)()>(hot::fnSparkSys)();
+    if (!sys) return;
+    for (int i = 0; i < 50; i++) {
+        BYTE* E = sys + 0x1CC3C28 + i * 0x3C;
+        if (!*reinterpret_cast<DWORD*>(E)) continue;            // no texture: unused
+        DWORD& flags = *reinterpret_cast<DWORD*>(E + 0x28);
+        if (!(flags & 1) || (flags & 4)) continue;              // (flag 4 wins the dispatch anyway)
+        flags = (flags & ~0x9u) | 4u;
+        g_sparkSwitched[i] = *reinterpret_cast<DWORD*>(E);
+        *reinterpret_cast<float*>(E + 0x2C) *= g_cfg.sparkWidth;
+        *reinterpret_cast<float*>(E + 0x18) *= g_cfg.sparkWidth;
+        Logf("sparks: type %d drawn as streaks (flags now %X, width %.3f, colour %08X)\n", i, flags,
+             *reinterpret_cast<float*>(E + 0x2C), *reinterpret_cast<DWORD*>(E + 0x34));
+    }
+}
+// Only walls and cars: the game throws collision sparks (0x441BF0, thiscall:
+// contact, mover, impact; called from 0x442714 and 0x442CC2) for any hard
+// contact - landing a jump or bottoming out on a ramp too. The contact's vector
+// for the car (0x620B00: the same one the sparks fly along) is compared with
+// the car's up: mostly along it (more than sparkFloor of it) is the road under
+// the car, and no sparks are thrown; mostly across it is a wall or a car.
+typedef void (__attribute__((thiscall)) *CollSparks_t)(BYTE*, BYTE*, BYTE*, float);
+typedef void (__attribute__((thiscall)) *ContactVec_t)(BYTE*, float*, BYTE*, int);
+static LONG g_sparkFloorSkipped = 0, g_sparkSideKept = 0;
+static void __attribute__((thiscall)) HkCollSparks(BYTE* self, BYTE* contact, BYTE* mover, float impact) {
+    bool skip = false;
+    if (contact && mover && g_cfg.sparkFloor < 1.0f) {
+        float n[3] = { 0, 0, 0 };
+        reinterpret_cast<ContactVec_t>(hot::fnContactVec)(contact, n, mover, 1);
+        const float* up = reinterpret_cast<const float*>(mover + 0x10) + 4;   // the car's matrix, row 1
+        float nl = sqrtf(Dot3(n, n));
+        if (nl > 1e-4f) {
+            skip = fabsf(Dot3(n, up)) / nl > g_cfg.sparkFloor;
+            (skip ? g_sparkFloorSkipped : g_sparkSideKept)++;
+            LONG all = g_sparkFloorSkipped + g_sparkSideKept;
+            if (all == 50 || all == 500)                        // (for the log)
+                Logf("sparks: collision sparks: %ld from walls/cars, %ld from the road skipped\n", g_sparkSideKept, g_sparkFloorSkipped);
+        }
+    }
+    if (!skip) reinterpret_cast<CollSparks_t>(hot::fnCollSparks)(self, contact, mover, impact);
+}
+static void InstallSparks() {
+    if (g_cfg.sparkFloor < 1.0f) {
+        if (!PatchCall(hot::callCollSparks1, reinterpret_cast<void*>(&HkCollSparks), 5) ||
+            !PatchCall(hot::callCollSparks2, reinterpret_cast<void*>(&HkCollSparks), 5)) Logf("sparks: road filter patch FAILED\n");
+        else Logf("sparks: no collision sparks from the road under the car (sparkFloor %.2f)\n", g_cfg.sparkFloor);
+    }
+    if (!g_cfg.sparkStreaks) return;
+    g_sparkLength = g_cfg.sparkLength > 0.0f ? g_cfg.sparkLength : 0.25f;
+    BYTE fld[6] = { 0xD9, 0x05 };                               // fld dword ptr [&g_sparkLength]
+    DWORD a = reinterpret_cast<DWORD>(&g_sparkLength); memcpy(fld + 2, &a, 4);
+    if (!PatchBytes(hot::sparkStreakLen, fld, 6) ||
+         ((g_cfg.sparkVary > 0.0f || g_cfg.sparkHot > 0.0f || g_cfg.sparkCount > 0) &&
+         !PatchCall(hot::sparkSpawnEnd, reinterpret_cast<void*>(&SparkSpawnStub), 6))) { Logf("sparks: patch FAILED\n"); return; }
+    Logf("sparks: dotted sparks drawn as streaks, %.2f s of travel long, x%.1f wide; size +-%.0f%%, hot %.2f; "
+         "%d more a car-hit spark, %.0f/s at most (spread %.2f, up %.2f)\n", g_sparkLength, g_cfg.sparkWidth, g_cfg.sparkVary * 100.0f,
+         g_cfg.sparkHot, g_cfg.sparkCount, g_cfg.sparkRate, g_cfg.sparkSpread, g_cfg.sparkUp);
 }
 
 // ---------------------------------------------------------------------------
@@ -2621,6 +3251,8 @@ BOOL APIENTRY DllMain(HMODULE h, DWORD reason, LPVOID reserved) {
             InstallSaveFolder();
             InstallDisplaySettings();
             InstallFrameRate();
+            InstallSpeedBlur();
+            InstallSparks();
             InstallRaceMusic();
             InstallGameLog();
             InstallCloseExits();
@@ -2629,6 +3261,7 @@ BOOL APIENTRY DllMain(HMODULE h, DWORD reason, LPVOID reserved) {
             InstallGrid();
             InstallStartBoost();
             InstallAI();
+            InstallRampage();
         }
     } else if (reason == DLL_PROCESS_DETACH) {
         if (reserved) g_logLockInit = false;
