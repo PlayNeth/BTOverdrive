@@ -8,6 +8,20 @@ The plugin checks the exe's bytes at every place it patches. If anything differs
 
 ---
 
+## 0.5.1: sound
+
+**Music**
+- **No more "scratched disc":** the music sometimes repeated a bit of itself over and over, in menus and races, in the vanilla PC game too.
+  - It plays from a looping buffer of only half a second, which its thread must refill within a third of a second of each slice playing.
+  - Its file reads queued behind every other read in the game, on a single file thread that checks for requests every 10 ms. Behind another read, it missed its turn and the buffer replayed its last half second until the read came through.
+  - Fixes: a 1.1-second buffer, so each slice has three quarters of a second to be refilled; the music reads the archive itself through its own handle; and its thread runs at above-normal priority. Any read that still takes over 100 ms is logged (`musicStream`).
+
+**Sound effects**
+- **64 voices:** on Windows Vista and later the game got only 16 sound effects at once, where cards of its time gave it 64. Busy moments stopped sounds dead and restarted engine and skid loops from the beginning (`soundVoices`).
+- **Real Doppler:** the game pitch-shifted every opponent and world sound by your speed alone, as if each one stood still, so they warbled as you sped up and slowed down. Each 3D sound's speed is now measured from how it actually moves, so a car keeping pace with you doesn't shift and one passing you does. It works the same under Windows' DirectSound or a wrapper such as DSOAL. `soundDoppler=1` gives the game's version back, `0` turns Doppler off, and `soundDopplerScale` sets its strength.
+- **Headroom:** sound effects are 3 dB quieter, so a pile of them doesn't clip in the software mix (`soundHeadroom`).
+- **New INI keys:** see the table.
+
 ## 0.5.0: Beat That! Overdrive
 
 **New name**
@@ -227,6 +241,10 @@ HWBTFix 0.3.8's keys, plus the mod's own:
 | `perfLog` | `0` | Frame timing in the log every 10 s. |
 | `menuFixes` | `1` | The 2D half-pixel fix (no line at the top of the menus) and the track name changing with its card. |
 | `musicAtGo` | `1` | Race music starts at GO (`0` = during the countdown). |
+| `musicStream` | `1` | Music streaming fixes: 1.1 s buffer, its own archive reads, above-normal priority. |
+| `soundVoices` | `1` | Up to 64 sound effects at once (Windows Vista and later gave the game 16). |
+| `soundDoppler` / `soundDopplerScale` | `2` / `1` | Doppler: `2` = from each sound's movement, `1` = the game's, `0` = off; strength. |
+| `soundHeadroom` | `3` | Sound effects this many dB quieter, against clipping. |
 | `scrapeSound` | `1` | The game's metalscrape sound when grinding walls and cars. |
 | `sparkImpactRef` / `sparkImpactMax` / `sparkTwist` | `3800` / `1.6` / `25` | Hit strength for normal-size sparks (`0` = all the same); the biggest hits' size ×; degrees each spark turns off its course. |
 
