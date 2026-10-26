@@ -57,7 +57,7 @@
 
 #define MOD_NAME "Beat That! Overdrive"
 #define MOD_FILE "BTOverdrive"                   // .asi, .ini, logs, tuning file
-#define HWBT_VERSION "0.5.1"
+#define HWBT_VERSION "0.5.2"
 #define HWBT_BASE "HWBTFix 0.3.8"
 
 // ---------------------------------------------------------------------------
@@ -193,6 +193,28 @@ namespace hot {
     const DWORD sndHwVoicesCmp = 0x53A21B;   // cmp eax,0x10: the card's 3D buffer count, at least 16
     const DWORD sndHwVoicesMin = 0x53A226;   // mov [esi+0xC8],0x10 (10 bytes)
     const DWORD sndDopplerLd   = 0x537DF2;   // fld [esi+0x24]: a sound's Doppler factor, set on the listener as it starts
+    const DWORD eaxDefaultOff  = 0x53926F;   // mov [ecx+0x14],0: the sound settings' "EAX on" default (never set to 1 on PC)
+    const DWORD callEnvChange[2] = { 0x6105DC, 0x6105E8 };   // call 0x537420: a trigger zone's reverb preset (cdecl, id)
+    const DWORD fnEnvChange    = 0x537420;   //   (EAX 4 FX slot 0 reverb = preset 0x935220 + id x 0x70: 9 presets, 0-8)
+    const DWORD voiceStop[3]   = { 0x5367D0, 0x53686C, 0x5379F8 };   // mov edx,[ecx+0x48] / push eax / call edx: Stop a voice's
+                                             //   buffer before releasing it (3D teardown, 2D teardown, a 2D loop timed out)
+    const DWORD callStopAll[3] = { 0x537100, 0x537125, 0x539FF9 };   // call 0x537060: stop every 3D voice at once
+    const DWORD fnStopAll      = 0x537060;   //   (cdecl; losing focus 0x40EA64.., a sound reset)
+    const DWORD callOvRead     = 0x53B012;   // call 0x708820: ov_read in the music decode loop
+    const DWORD fnOvRead       = 0x708820;
+    const DWORD ioThreadWait   = 0x58E3EB;   // push 0xA: the archive I/O thread's poll, 10 ms
+    const DWORD fnLineCollide  = 0x635580;   // bool cdecl (start, end, exclude kd): a segment vs the track's static geometry
+    const DWORD lineHitGlobals = 0x969818;   //   its hit results, 0x3C bytes (kept around ours)
+    const DWORD lineSides      = 0x96A2D0;   //   int: triangles' sides it tests (0 front, 1 back, 2 both)
+    const DWORD volumes        = 0x92D0F0;   // the live volumes: SFX, music, speech (ints 0..16383; 0x1FFF at boot)
+    const DWORD fnVolApply     = 0x4335B0;   //   apply them (thiscall, the volumes)
+    const DWORD callVolConfirm = 0x50A35F;   // call 0x4335B0: the sound menu's confirm, values changed
+    const DWORD callPoolRelease[2] = { 0x4483EE, 0x44853E };   // call 0x5CF890: GSNxAllocator_c's destructors free its pool
+    const DWORD fnPoolRelease  = 0x5CF890;   //   (thiscall, pool: +0 block, +4/+8/+0x18 cleared)
+    const DWORD callJobsDone   = 0x47B7E3;   // call 0x431F20: race load step 17, are the drivers' and gunners' models in?
+    const DWORD fnJobsDone     = 0x431F20;   //   (thiscall, the job table [0x953D68]: 2 x { manager, jobs, count }; bool)
+    const DWORD fnArcService   = 0x5B6F90;   // advance every archive being streamed by one state (cdecl; once a frame)
+    const DWORD fnLoadMgrTick  = 0x63C9F0;   // a model load manager's update: its pending loads, one state each (thiscall)
     const DWORD callSndUpdate  = 0x4210EB;   // call 0x537F70 (cdecl, float dt): the sound update, once per 60 Hz step
     const DWORD fnSndUpdate    = 0x537F70;
     const DWORD dsSingleton    = 0x953A50;   // the DirectSound object (+0x30 IDirectSound8, +0xD0 the 3D listener)
@@ -346,6 +368,28 @@ namespace hot {
         { sndDopplerLd,   "\xD9\x46\x24", 3 },
         { sndDopplerInit, "\xD9\xE8", 2 },
         { callSndUpdate,  "\xE8\x80\x6E\x11\x00", 5 },            // call 0x537F70
+        { voiceStop[0],   "\x8B\x51\x48\x50\xFF\xD2", 6 },     // mov edx,[ecx+0x48] / push eax / call edx
+        { voiceStop[1],   "\x8B\x51\x48\x50\xFF\xD2", 6 },
+        { voiceStop[2],   "\x8B\x51\x48\x50\xFF\xD2", 6 },
+        { callStopAll[0], "\xE8\x5B\xFF\xFF\xFF", 5 },            // call 0x537060
+        { callStopAll[1], "\xE8\x36\xFF\xFF\xFF", 5 },
+        { callStopAll[2], "\xE8\x62\xD0\xFF\xFF", 5 },
+        { fnLineCollide,  "\x83\xEC\x30\x8B\x44\x24\x38\x8B\x08\x8B\x50\x04", 12 },
+        { 0x50A35A,       "\xB9\xF0\xD0\x92\x00\xE8\x4C\x92\xF2\xFF", 10 },   // mov ecx,0x92D0F0 / call 0x4335B0
+        { fnVolApply,     "\x56\x8B\xF1\x8B\x06\x50\xE8", 7 },
+        { callPoolRelease[0], "\xE8\x9D\x74\x18\x00", 5 },        // call 0x5CF890
+        { callPoolRelease[1], "\xE8\x4D\x73\x18\x00", 5 },
+        { fnPoolRelease,  "\x56\x8B\xF1\x83\x7E\x04\x00\x74\x20\x8B\x06\x8B\x48\x04", 14 },
+        { 0x47B7DA,       "\x8B\x0D\x68\x3D\x95\x00\x83\xC4\x04\xE8\x38\x67\xFB\xFF\x84\xC0\x74\x13", 18 },   // mov ecx,[0x953D68] / .. / call 0x431F20
+        { fnJobsDone,     "\x83\xEC\x08\x53\x55\x56\x57\xC6\x44\x24\x13\x01", 12 },
+        { fnArcService,   "\x51\x56\x8B\x35\xB4\x12\x96\x00\x85\xF6", 10 },
+        { fnLoadMgrTick,  "\x56\x8B\xF1\x80\x7E\x4C\x02\x75\x05", 9 },
+        { callOvRead,     "\xE8\x09\xD8\x1C\x00", 5 },            // call 0x708820
+        { ioThreadWait,   "\x6A\x0A\x50\xFF\xD6", 5 },            // push 0xA / push eax / call esi (WaitForSingleObject)
+        { eaxDefaultOff,  "\xC7\x41\x14\x00\x00\x00\x00", 7 },
+        { 0x6105DC,       "\xE8\x3F\x6E\xF2\xFF", 5 },            // call 0x537420
+        { 0x6105E8,       "\xE8\x33\x6E\xF2\xFF", 5 },
+        { fnEnvChange,    "\x56\x8B\x74\x24\x08\x56\x68\x88\x34\x8B\x00\xE8", 12 },
         { sndVolTable,    "\x00\x80\xBB\xC5\x00\x00\x16\xC5", 8 },   // -6000.0, -2400.0
         { musChunkMov,    "\xC7\x86\xB0\x01\x03\x00\xD8\x72\x00\x00", 10 },
         { musReadCbMov,   "\xC7\x86\xE8\x05\x03\x00\xF0\xE3\x5D\x00", 10 },
@@ -449,6 +493,12 @@ struct Config {
     float shadowFar = 2000.0f;           //   ...and seeing this deep (game: 64)
     int   perfLog = 0;                   // frame timing in the log every 10 s
     int   menuFixes = 1;                 // menus: the stray line at the top, the track name changing before its card
+    int   soundOcclusion = 1;            // with EAX: sounds behind the track's walls are muffled
+    float soundOcclusionDb = 15.0f;      //   by this much (EAX occlusion: mostly the highs)
+    int   soundKeepVolume = 1;           // the volumes set in the sound menu apply from the start (the game: 50% until a profile loads)
+    int   soundFade = 1;                 // a sound cut off (to make room, or stopped) fades out over ~50 ms instead of clicking
+    int   fastLoad = 1;                  // the game's file reads: polled every 1 ms instead of 10 (faster loading)
+    int   soundEax = 1;                  // EAX reverb by trigger zone (tunnels, caves...) when the sound device has EAX (DSOAL...)
     int   soundVoices = 1;               // sound effects: up to 64 at once (Windows Vista+ gave the game 16)
     int   soundDoppler = 2;              // Doppler: 2 = from each sound's real movement, 1 = the game's (sources standing still), 0 = off
     float soundDopplerScale = 1.0f;      //   with 2: how strong (1 = real-world)
@@ -646,6 +696,11 @@ static const char kIniText[] =
     "glassNoZWrite=1\n"
     "; frame timing in BTOverdrive.log every 10 s (where the time goes: waiting, game, 3D, draw+present)\n"
     "perfLog=0\n"
+    "; --- loading ---\n"
+    "; faster race loading: the drivers' models load one stage a game step, ~3 s a race - 1 = as many\n"
+    ";   stages as fit in each frame while the race loader waits for them; file reads polled every 1 ms,\n"
+    ";   not 10 (0 = the game's)\n"
+    "fastLoad=1\n"
     "; --- menus ---\n"
     "; the 1-pixel line at the top of the menus, and the track select showing the next track's name\n"
     ";   on the old card for a frame (0 = as the game has them)\n"
@@ -657,6 +712,20 @@ static const char kIniText[] =
     ";   behind the game's other file reads. 1 = more buffer, its own reads, a higher-priority thread (0 = the game's)\n"
     "musicStream=1\n"
     "; --- sound effects ---\n"
+    "; EAX reverb: each track's zones set a reverb (9 presets) as you drive through them, when the sound\n"
+    ";   device has EAX - a wrapper such as DSOAL (see dsound-com-redirect.reg); Windows' own has none.\n"
+    ";   The PC game finds EAX and then switches it off: its \"EAX on\" setting is never set (0 = as the game)\n"
+    "soundEax=1\n"
+    "; with EAX: a sound with a wall of the track between it and you is muffled by soundOcclusionDb\n"
+    ";   (EAX occlusion: mostly the highs) - the game asks for every sound's EAX controls and never uses them\n"
+    "soundOcclusion=1\n"
+    "soundOcclusionDb=15\n"
+    "; a sound effect that's stopped or cut off to make room fades out over about 50 ms instead of\n"
+    ";   stopping dead with a click (0 = the game's)\n"
+    "soundFade=1\n"
+    "; the music, effects and speech volumes you confirm in the sound menu are kept (BTOverdrive_volume.txt) and\n"
+    ";   applied as soon as the sound starts: the game's are 50% until a profile is loaded (0 = the game's)\n"
+    "soundKeepVolume=1\n"
     "; up to 64 sound effects at once: on Windows Vista and later the game only got 16, cutting sounds off\n"
     ";   mid-play and restarting engine and skid loops (0 = the game's)\n"
     "soundVoices=1\n"
@@ -810,6 +879,12 @@ static void LoadConfig() {
         else if (!_stricmp(key, "shadowFar"))          g_cfg.shadowFar = (float)atof(val);
         else if (!_stricmp(key, "perfLog"))            g_cfg.perfLog = n;
         else if (!_stricmp(key, "menuFixes"))          g_cfg.menuFixes = n;
+        else if (!_stricmp(key, "soundOcclusion"))     g_cfg.soundOcclusion = n;
+        else if (!_stricmp(key, "soundOcclusionDb"))   { float v = (float)atof(val); g_cfg.soundOcclusionDb = v < 0.0f ? 0.0f : v > 100.0f ? 100.0f : v; }
+        else if (!_stricmp(key, "soundKeepVolume"))    g_cfg.soundKeepVolume = n;
+        else if (!_stricmp(key, "soundFade"))          g_cfg.soundFade = n;
+        else if (!_stricmp(key, "fastLoad"))           g_cfg.fastLoad = n;
+        else if (!_stricmp(key, "soundEax"))           g_cfg.soundEax = n;
         else if (!_stricmp(key, "soundVoices"))        g_cfg.soundVoices = n;
         else if (!_stricmp(key, "soundDoppler"))       g_cfg.soundDoppler = n;
         else if (!_stricmp(key, "soundDopplerScale"))  g_cfg.soundDopplerScale = (float)atof(val);
@@ -3585,29 +3660,48 @@ static void InstallMenuFixes() {
 //  - Headroom: the gain-to-attenuation table (0x935650, 17 steps of -6000..0
 //    hundredths of dB) is lowered by soundHeadroom dB, so a pile of full-volume
 //    sounds clips less in the software mix.
-// Doppler from movement (soundDoppler=2). Every 3D sound's velocity is measured
-// from how its position moves from one sound update to the next (0x537F70, once
-// per 60 Hz step, where the game positions them): the 3D buffers' SetPosition
-// (IDirectSound3DBuffer +0x4C) also sets the velocity, the game's own
-// SetVelocity calls (+0x50, always 0) are dropped, a sound not moved for 2
-// updates is set still, and a jump of over 10 units in a step (a respawn, a sound
-// reused elsewhere) isn't a speed. The listener's velocity is the game's (your
-// car's), its Doppler factor soundDopplerScale (the game set a per-sound value
-// on it as each sound started, +0x30). The methods are DirectSound's (or a
-// wrapper's): found on a 3D buffer made for the purpose once the game's sound is
-// up, and hooked in their vtable.
+// 3D sound hooks: the methods are DirectSound's (or a wrapper's), found on a 3D
+// buffer made for the purpose once the game's sound is up, and hooked in their
+// vtables: the 3D buffer's SetPosition (+0x4C), SetVelocity (+0x50), Release,
+// the listener's SetPosition (+0x38) and SetDopplerFactor (+0x30). Each 3D sound
+// is tracked by its 3D interface from its first SetPosition until it's released.
+//  - Doppler from movement (soundDoppler=2). Every 3D sound's velocity is
+//    measured from how its position moves from one sound update to the next
+//    (0x537F70, once per 60 Hz step, where the game positions them) and set
+//    with the position; the game's own SetVelocity calls (always 0) are
+//    dropped, a sound not moved for 2 updates is set still, and a jump of over
+//    10 units in a step (a respawn, a sound reused elsewhere) isn't a speed.
+//    The listener's velocity is the game's (your car's), its Doppler factor
+//    soundDopplerScale (the game set a per-sound value on it as each sound
+//    started).
+//  - Occlusion (soundOcclusion, with EAX on): the game gets every 3D sound's
+//    EAX controls (its IKsPropertySet) and never uses them. Each step a few
+//    sounds (round robin) are checked for a wall between them and the listener
+//    with the game's own line test against the track (0x635580, as its replay
+//    cameras use it: both-sided, the hit globals kept); one behind a wall gets
+//    EAX 4 source occlusion soundOcclusionDb (muffled: mostly highs), eased in
+//    and out. Positions here are DirectSound's: the game's with x negated.
 typedef HRESULT (__stdcall *Set3_t)(void*, float, float, float, DWORD);
 typedef HRESULT (__stdcall *SetF_t)(void*, float, DWORD);
 typedef ULONG (__stdcall *Rel_t)(void*);
-static Set3_t g_ds3SetPos, g_ds3SetVel;
+typedef HRESULT (__stdcall *QI_t)(void*, const GUID&, void**);
+typedef HRESULT (__stdcall *KsSet_t)(void*, const GUID&, ULONG, void*, ULONG, void*, ULONG);
+static Set3_t g_ds3SetPos, g_ds3SetVel, g_dsLsnSetPos;
 static SetF_t g_dsLsnDoppler;
 static Rel_t g_ds3Release;
-struct SndSrc { void* buf; float pos[3]; LONG step; bool moving; };
+struct SndSrc { void* buf; float pos[3]; LONG step; bool moving; void* ks; bool ksTried; LONG occ, occTarget; };
 static SndSrc g_sndSrc[256];
 static LONG g_sndStep = 0;
 static float g_sndDt = 1.0f / 60.0f;
-static int g_dopplerState = 0;                                  // 0 not yet, 1 hooked, -1 gave up
-static int g_dopplerTries = 0;
+static float g_lsnPos[3];
+static int g_snd3dState = 0;                                    // 0 not yet, 1 hooked, -1 gave up
+static int g_snd3dTries = 0;
+static int g_occNext = 0;
+static LONG g_occFailLogged = 0;
+static const GUID kIidKsPropertySet = { 0x31EFAC30, 0x515C, 0x11D0, { 0xA9, 0xAA, 0x00, 0xAA, 0x00, 0x61, 0xBE, 0x93 } };
+static const GUID kEax40Source = { 0x1B86B823, 0x22DF, 0x4EAE, { 0x8B, 0x3C, 0x12, 0x78, 0xCE, 0x54, 0x42, 0x27 } };
+static const ULONG kEaxSourceOcclusion = 11;                    // EAXSOURCE_OCCLUSION: long, hundredths of dB (-10000..0)
+static bool EaxOn() { BYTE* ds = *reinterpret_cast<BYTE**>(hot::dsSingleton); return ds && ds[0xDA]; }
 static SndSrc* SndFind(void* buf, bool add) {
     SndSrc* free = nullptr;
     for (SndSrc& e : g_sndSrc) {
@@ -3616,43 +3710,60 @@ static SndSrc* SndFind(void* buf, bool add) {
     }
     if (!add || !free) return nullptr;
     free->buf = buf; free->step = LONG_MIN / 2; free->moving = false;
+    free->ks = nullptr; free->ksTried = false; free->occ = free->occTarget = 0;
     return free;
 }
 static HRESULT __stdcall HkDs3SetPos(void* b, float x, float y, float z, DWORD apply) {
     HRESULT hr = g_ds3SetPos(b, x, y, z, apply);
     SndSrc* e = SndFind(b, true);
     if (!e) return hr;
-    float v[3] = { 0, 0, 0 };
     LONG steps = g_sndStep - e->step;
+    if (steps == 0) return hr;                                  // (twice in one update: keep the first)
+    float v[3] = { 0, 0, 0 };
     if (steps >= 1 && steps <= 4) {                             // (moved since its last position: a speed)
         float d[3] = { x - e->pos[0], y - e->pos[1], z - e->pos[2] };
         float k = 1.0f / (steps * g_sndDt);
         if (Dot3(d, d) < 100.0f * steps * steps)                // (under 10 units a step: not a jump)
             for (int a = 0; a < 3; a++) v[a] = d[a] * k;
     }
-    if (steps != 0) {                                           // (twice in one update: keep the first speed)
-        e->pos[0] = x; e->pos[1] = y; e->pos[2] = z; e->step = g_sndStep;
+    e->pos[0] = x; e->pos[1] = y; e->pos[2] = z; e->step = g_sndStep;
+    if (g_cfg.soundDoppler == 2) {
         e->moving = v[0] != 0.0f || v[1] != 0.0f || v[2] != 0.0f;
         g_ds3SetVel(b, v[0], v[1], v[2], apply);
     }
     return hr;
 }
-static HRESULT __stdcall HkDs3SetVel(void*, float, float, float, DWORD) { return S_OK; }   // (the game's: always 0)
-static HRESULT __stdcall HkDsLsnDoppler(void* l, float, DWORD apply) { return g_dsLsnDoppler(l, g_cfg.soundDopplerScale, apply); }
+static HRESULT __stdcall HkDs3SetVel(void* b, float x, float y, float z, DWORD apply) {
+    if (g_cfg.soundDoppler == 2) return S_OK;                   // (the game's: always 0 - ours is set with the position)
+    return g_ds3SetVel(b, x, y, z, apply);
+}
+static HRESULT __stdcall HkDsLsnSetPos(void* l, float x, float y, float z, DWORD apply) {
+    g_lsnPos[0] = x; g_lsnPos[1] = y; g_lsnPos[2] = z;
+    return g_dsLsnSetPos(l, x, y, z, apply);
+}
+static HRESULT __stdcall HkDsLsnDoppler(void* l, float f, DWORD apply) {
+    return g_dsLsnDoppler(l, g_cfg.soundDoppler == 2 ? g_cfg.soundDopplerScale : f, apply);
+}
 static ULONG __stdcall HkDs3Release(void* b) {
     // (dropped at any release, not only the last: the game releases a sound's 3D
     // interface as it tears it down (0x5367C0), and whether that's the object's
-    // last reference depends on the DirectSound in use - never touch one after)
-    SndSrc* e = SndFind(b, false); if (e) e->buf = nullptr;
+    // last reference depends on the DirectSound in use - never touch one after.
+    // Our own reference to its EAX controls goes first.)
+    SndSrc* e = SndFind(b, false);
+    if (e) {
+        void* ks = e->ks; e->buf = nullptr; e->ks = nullptr;
+        if (ks) reinterpret_cast<Rel_t>((*reinterpret_cast<void***>(ks))[2])(ks);
+    }
     return g_ds3Release(b);
 }
-static void DopplerHook() {                                     // (the game's sound is up: find the methods)
+static void Sound3dHook() {                                     // (the game's sound is up: find the methods)
     BYTE* ds = *reinterpret_cast<BYTE**>(hot::dsSingleton);
     void* dev = ds ? *reinterpret_cast<void**>(ds + 0x30) : nullptr;
     void* lsn = ds ? *reinterpret_cast<void**>(ds + 0xD0) : nullptr;
     if (!dev || !lsn) return;                                   // (not yet)
-    Logf("sound: the device reports %lu hardware 3D voices; EAX %s\n", *reinterpret_cast<DWORD*>(ds + 0x60), ds[0xDA] ? "on" : "off");
-    if (++g_dopplerTries > 3) { g_dopplerState = -1; Logf("sound: Doppler hook FAILED (no 3D buffer)\n"); return; }
+    if (!g_snd3dTries)
+        Logf("sound: the device reports %lu hardware 3D voices; EAX %s\n", *reinterpret_cast<DWORD*>(ds + 0x60), ds[0xDA] ? "on" : "off");
+    if (++g_snd3dTries > 3) { g_snd3dState = -1; Logf("sound: 3D sound hook FAILED (no 3D buffer)\n"); return; }
     WAVEFORMATEX wf = {}; wf.wFormatTag = WAVE_FORMAT_PCM; wf.nChannels = 1; wf.nSamplesPerSec = 22050;
     wf.wBitsPerSample = 16; wf.nBlockAlign = 2; wf.nAvgBytesPerSec = 44100;
     struct { DWORD size, flags, bytes, reserved; WAVEFORMATEX* fmt; GUID alg; } desc = { 36, 0xB0, 4096, 0, &wf, GUID() };
@@ -3661,7 +3772,6 @@ static void DopplerHook() {                                     // (the game's s
     if (reinterpret_cast<Create_t>((*reinterpret_cast<void***>(dev))[0x0C / 4])(dev, &desc, &buf, nullptr) < 0 || !buf) return;
     static const GUID iid3d = { 0x279AFA86, 0x4981, 0x11CE, { 0xA5, 0x21, 0x00, 0x20, 0xAF, 0x0B, 0xE5, 0x60 } };
     void* b3 = nullptr;
-    typedef HRESULT (__stdcall *QI_t)(void*, const GUID&, void**);
     reinterpret_cast<QI_t>((*reinterpret_cast<void***>(buf))[0])(buf, iid3d, &b3);
     bool ok = false;
     if (b3) {
@@ -3670,29 +3780,193 @@ static void DopplerHook() {                                     // (the game's s
         g_ds3Release = reinterpret_cast<Rel_t>(vt3[2]);
         g_ds3SetPos = reinterpret_cast<Set3_t>(vt3[0x4C / 4]);
         g_ds3SetVel = reinterpret_cast<Set3_t>(vt3[0x50 / 4]);
+        g_dsLsnSetPos = reinterpret_cast<Set3_t>(vtl[0x38 / 4]);
         g_dsLsnDoppler = reinterpret_cast<SetF_t>(vtl[0x30 / 4]);
         ok = PatchPointer(&vt3[0x4C / 4], reinterpret_cast<void*>(&HkDs3SetPos)) &&
              PatchPointer(&vt3[0x50 / 4], reinterpret_cast<void*>(&HkDs3SetVel)) &&
              PatchPointer(&vt3[2], reinterpret_cast<void*>(&HkDs3Release)) &&
+             PatchPointer(&vtl[0x38 / 4], reinterpret_cast<void*>(&HkDsLsnSetPos)) &&
              PatchPointer(&vtl[0x30 / 4], reinterpret_cast<void*>(&HkDsLsnDoppler));
         reinterpret_cast<Rel_t>(vt3[2])(b3);                    // (through the hook if it's in: not tracked anyway)
-        g_dsLsnDoppler(lsn, g_cfg.soundDopplerScale, 0);        // (DS3D_IMMEDIATE)
+        if (g_cfg.soundDoppler == 2) g_dsLsnDoppler(lsn, g_cfg.soundDopplerScale, 0);   // (DS3D_IMMEDIATE)
     }
     reinterpret_cast<Rel_t>((*reinterpret_cast<void***>(buf))[2])(buf);
-    g_dopplerState = ok ? 1 : -1;
-    Logf(ok ? "sound: Doppler from the sounds' movement (x%.2f)\n" : "sound: Doppler hook FAILED\n", g_cfg.soundDopplerScale);
+    g_snd3dState = ok ? 1 : -1;
+    if (!ok) { Logf("sound: 3D sound hook FAILED\n"); return; }
+    if (g_cfg.soundDoppler == 2) Logf("sound: Doppler from the sounds' movement (x%.2f)\n", g_cfg.soundDopplerScale);
+    if (g_cfg.soundOcclusion) Logf("sound: occlusion %s\n", ds[0xDA] ? "on (EAX)" : "off (no EAX)");
 }
+// Is there track between two DirectSound positions? (the game's line test, both-sided)
+static bool WallBetween(const float* a, const float* b) {
+    float s[3] = { -a[0], a[1], a[2] }, t[3] = { -b[0], b[1], b[2] };
+    BYTE save[0x3C]; memcpy(save, reinterpret_cast<void*>(hot::lineHitGlobals), sizeof(save));
+    int mode = *reinterpret_cast<int*>(hot::lineSides);
+    *reinterpret_cast<int*>(hot::lineSides) = 2;
+    bool hit = reinterpret_cast<bool (__cdecl *)(const float*, const float*, void*)>(hot::fnLineCollide)(s, t, nullptr);
+    *reinterpret_cast<int*>(hot::lineSides) = mode;
+    memcpy(reinterpret_cast<void*>(hot::lineHitGlobals), save, sizeof(save));
+    return hit;
+}
+static void OcclusionStep() {
+    if (!EaxOn()) return;
+    int rays = 0;
+    for (int n = 0; n < 256 && rays < 4; n++) {                 // a few line tests a step, round robin
+        SndSrc& e = g_sndSrc[g_occNext]; g_occNext = (g_occNext + 1) & 255;
+        if (!e.buf || g_sndStep - e.step > 30) continue;        // (gone, or not placed for half a second)
+        float d[3] = { e.pos[0] - g_lsnPos[0], e.pos[1] - g_lsnPos[1], e.pos[2] - g_lsnPos[2] };
+        float dd = Dot3(d, d);
+        if (dd < 25.0f || dd > 400.0f * 400.0f) { e.occTarget = 0; continue; }   // (at you - your car - or out of earshot)
+        // the line stops 2 units short of the sound: one at the road (wheels, skids,
+        // landings) would otherwise hit the very surface it sits on
+        float l = sqrtf(dd), k = (l - 2.0f) / l;
+        float end[3] = { g_lsnPos[0] + d[0] * k, g_lsnPos[1] + d[1] * k, g_lsnPos[2] + d[2] * k };
+        e.occTarget = WallBetween(g_lsnPos, end) ? -(LONG)(g_cfg.soundOcclusionDb * 100.0f) : 0;
+        rays++;
+    }
+    for (SndSrc& e : g_sndSrc) {                                // ease toward it: 6 dB a step
+        if (!e.buf || e.occ == e.occTarget) continue;
+        if (!e.ksTried) {
+            e.ksTried = true;
+            reinterpret_cast<QI_t>((*reinterpret_cast<void***>(e.buf))[0])(e.buf, kIidKsPropertySet, &e.ks);
+        }
+        if (!e.ks) { e.occ = e.occTarget; continue; }
+        LONG v = e.occ + (e.occTarget > e.occ ? 600 : -600);
+        if ((e.occTarget - v) * (e.occTarget - e.occ) <= 0) v = e.occTarget;   // (passed it)
+        HRESULT hr = reinterpret_cast<KsSet_t>((*reinterpret_cast<void***>(e.ks))[0x10 / 4])(e.ks, kEax40Source, kEaxSourceOcclusion,
+                                                                                           nullptr, 0, &v, sizeof(v));
+        if (hr < 0 && InterlockedIncrement(&g_occFailLogged) <= 3) Logf("sound: EAX occlusion not taken (%08lX)\n", (unsigned long)hr);
+        e.occ = v;
+    }
+}
+// Fade-out (soundFade). A sound is stopped - to make room for another, when its
+// voice is torn down (3D 0x5367C0, 2D 0x536860), or a 2D loop that timed out
+// (0x5379F8) - with Stop, then released: a cut mid-wave, a click. Those Stops
+// (6 bytes each: mov edx,[ecx+0x48] / push eax / call edx -> push eax / call)
+// come here instead: a playing buffer is kept (AddRef) and turned down 12 dB at
+// once and then each sound update (60 Hz), stopped and let go from -36 dB -
+// about 50 ms. The game releases its references at once as before; the voice
+// slot is free at once. Stopping every voice at once (0x537060: the window
+// losing focus, a sound reset - the updates may stop then) stays instant, and
+// ends the fades still going first; so does a fade that's had no update for
+// 150 ms, at the next.
+typedef ULONG (__stdcall *Ref_t)(void*);
+struct SndFade { void* buf; LONG vol0; LONG step; DWORD ms; };
+static SndFade g_fades[64];
+static void FadeEnd(SndFade& f) {
+    void** vt = *reinterpret_cast<void***>(f.buf);
+    reinterpret_cast<HRESULT (__stdcall *)(void*)>(vt[0x48 / 4])(f.buf);     // Stop
+    reinterpret_cast<Ref_t>(vt[2])(f.buf);                                    // our reference
+    f.buf = nullptr;
+}
+static HRESULT __stdcall FadeStop(void* buf) {
+    void** vt = *reinterpret_cast<void***>(buf);
+    typedef HRESULT (__stdcall *Stop_t)(void*);
+    DWORD status = 0, now = GetTickCount();
+    SndFade* slot = nullptr;
+    for (SndFade& f : g_fades) {
+        if (f.buf && now - f.ms > 150) FadeEnd(f);              // (no sound updates for a while: finish them now)
+        if (!f.buf && !slot) slot = &f;
+    }
+    reinterpret_cast<HRESULT (__stdcall *)(void*, DWORD*)>(vt[0x24 / 4])(buf, &status);   // GetStatus
+    LONG vol = 0;
+    if (!slot || !(status & 1 /* DSBSTATUS_PLAYING */) ||
+        reinterpret_cast<HRESULT (__stdcall *)(void*, LONG*)>(vt[0x18 / 4])(buf, &vol) < 0)   // GetVolume
+        return reinterpret_cast<Stop_t>(vt[0x48 / 4])(buf);     // (not playing, or no room: as the game)
+    reinterpret_cast<Ref_t>(vt[1])(buf);                        // AddRef: ours until the fade ends
+    slot->buf = buf; slot->vol0 = vol; slot->step = g_sndStep; slot->ms = now;
+    LONG v = vol - 1200; if (v < -10000) v = -10000;
+    reinterpret_cast<HRESULT (__stdcall *)(void*, LONG)>(vt[0x3C / 4])(buf, v);   // SetVolume: the first step now
+    return S_OK;
+}
+static void FadeFlushAll() { for (SndFade& f : g_fades) if (f.buf) FadeEnd(f); }
+static void __cdecl HkStopAll() {
+    FadeFlushAll();
+    reinterpret_cast<void (__cdecl *)()>(hot::fnStopAll)();
+}
+static void FadeStep() {
+    for (SndFade& f : g_fades) {
+        if (!f.buf) continue;
+        LONG k = g_sndStep - f.step;
+        if (k < 1) continue;
+        LONG v = f.vol0 - 1200 * (k + 1);                       // (-12 dB came with the stop: -24, -36, then off)
+        if (k >= 3 || v <= -10000) { FadeEnd(f); continue; }
+        reinterpret_cast<HRESULT (__stdcall *)(void*, LONG)>((*reinterpret_cast<void***>(f.buf))[0x3C / 4])(f.buf, v);   // SetVolume
+    }
+}
+// Volumes. The sound menu's volumes are kept in the player's profile (+0xC0..)
+// and put back when it's loaded (0x45C577); until then - the front end, the
+// first menus - they're the boot default, 50% (0x92D0F0 = 0x1FFF each). (The
+// game's Settings.cfg would have kept settings too, but it's never written:
+// its writer is a stub with no live callers - nothing a player sets lives
+// there.) soundKeepVolume: the menu's confirm (0x50A35F, values changed) is
+// noted in BTOverdrive_volume.txt, and at the first sound update those are
+// applied (0x4335B0). A profile loaded later still puts in its own.
+static bool g_volRestored = false;
+static void VolPath(char* out, size_t n) { snprintf(out, n, "%s" MOD_FILE "_volume.txt", g_asiDir); }
+static void __attribute__((thiscall)) HkVolConfirm(BYTE* vols) {
+    reinterpret_cast<void (__attribute__((thiscall)) *)(BYTE*)>(hot::fnVolApply)(vols);
+    const int* v = reinterpret_cast<const int*>(vols);
+    char path[MAX_PATH]; VolPath(path, sizeof(path));
+    if (FILE* f = fopen(path, "w")) {
+        fprintf(f, "%d %d %d\n; sound effects, music, speech (0-16383): the sound menu's, applied at start\n", v[0], v[1], v[2]);
+        fclose(f);
+        Logf("sound: volumes kept (effects %d, music %d, speech %d)\n", v[0], v[1], v[2]);
+    }
+}
+static void VolRestore() {
+    g_volRestored = true;
+    char path[MAX_PATH]; VolPath(path, sizeof(path));
+    FILE* f = fopen(path, "r");
+    if (!f) return;
+    int v[3];
+    bool ok = fscanf(f, "%d %d %d", &v[0], &v[1], &v[2]) == 3;
+    fclose(f);
+    if (!ok) return;
+    for (int& x : v) x = x < 0 ? 0 : x > 16383 ? 16383 : x;
+    int* live = reinterpret_cast<int*>(hot::volumes);
+    for (int i = 0; i < 3; i++) live[i] = v[i];
+    reinterpret_cast<void (__attribute__((thiscall)) *)(int*)>(hot::fnVolApply)(live);
+    Logf("sound: volumes applied (effects %d, music %d, speech %d)\n", v[0], v[1], v[2]);
+}
+static bool Sound3dWanted() { return g_cfg.soundDoppler == 2 || g_cfg.soundOcclusion; }
 static void __cdecl HkSndUpdate(float dt) {
-    if (g_dopplerState == 0) DopplerHook();
+    if (g_snd3dState == 0 && Sound3dWanted()) Sound3dHook();
+    if (!g_volRestored && g_cfg.soundKeepVolume && *reinterpret_cast<BYTE**>(hot::dsSingleton)) VolRestore();
     if (dt > 0.0f) g_sndDt = dt;
     g_sndStep++;
     reinterpret_cast<void (__cdecl *)(float)>(hot::fnSndUpdate)(dt);
-    if (g_dopplerState != 1) return;
-    for (SndSrc& e : g_sndSrc)                                  // not moved for 2 updates: still
-        if (e.buf && e.moving && g_sndStep - e.step >= 2) { e.moving = false; g_ds3SetVel(e.buf, 0, 0, 0, 0); }
+    if (g_cfg.soundFade) FadeStep();
+    if (g_snd3dState != 1) return;
+    if (g_cfg.soundDoppler == 2)
+        for (SndSrc& e : g_sndSrc)                              // not moved for 2 updates: still
+            if (e.buf && e.moving && g_sndStep - e.step >= 2) { e.moving = false; g_ds3SetVel(e.buf, 0, 0, 0, 0); }
+    if (g_cfg.soundOcclusion) OcclusionStep();
 }
+// EAX. The game has zone-driven reverb: each frame the trigger zones the camera
+// is in (0x610EA0) give a reverb id (0x6105A0, type-1 zone tags; none: 3), and a
+// change sets EAX 4's FX slot 0 reverb to one of 9 presets tuned for the game
+// (0x537420: 0x935220 + id x 0x70, EAXREVERB_ALLPARAMETERS). At startup it
+// probes the device for EAX 4 (0x5398C0) - and then closes it again unless its
+// sound settings say "EAX on" (+0x14), which default to 0 (0x5391F0) and are
+// only ever set from a saved settings record the PC game never writes: EAX was
+// off on every PC, with any card. soundEax=1: the default is 1. And ids 1-13 are
+// passed on, but there are 9 presets: one above 8 read past the table (the
+// sound volume table after it) - it gets the default, 3.
+static LONG g_envLogged = 0;
+static void __cdecl HkEnvChange(int id) {
+    int use = id >= 0 && id <= 8 ? id : 3;
+    if (InterlockedIncrement(&g_envLogged) <= 40)
+        Logf("sound: reverb zone %d%s\n", id, use != id ? " (no such preset: 3)" : "");
+    reinterpret_cast<void (__cdecl *)(int)>(hot::fnEnvChange)(use);
+}
+static bool __attribute__((thiscall)) HkJobsDone(BYTE* jobs);   // (Race loading, below)
 static void InstallSoundFx() {
     bool ok = true;
+    if (g_cfg.soundEax) {
+        static const BYTE one = 1;
+        ok = ok && PatchBytes(hot::eaxDefaultOff + 3, &one, 1);
+        for (DWORD at : hot::callEnvChange) ok = ok && PatchCall(at, reinterpret_cast<void*>(&HkEnvChange), 5);
+    }
     if (g_cfg.soundVoices) {
         static const BYTE n = 0x41;
         ok = ok && PatchBytes(hot::sndHwVoicesCmp + 2, &n, 1) && PatchBytes(hot::sndHwVoicesMin + 6, &n, 1);
@@ -3700,8 +3974,23 @@ static void InstallSoundFx() {
     if (g_cfg.soundDoppler == 0) {
         static const BYTE fldz3[3] = { 0xD9, 0xEE, 0x90 }, fldz2[2] = { 0xD9, 0xEE };
         ok = ok && PatchBytes(hot::sndDopplerLd, fldz3, 3) && PatchBytes(hot::sndDopplerInit, fldz2, 2);
-    } else if (g_cfg.soundDoppler == 2) {
+    }
+    if (g_cfg.soundKeepVolume)
+        ok = ok && PatchCall(hot::callVolConfirm, reinterpret_cast<void*>(&HkVolConfirm), 5);
+    if (Sound3dWanted() || g_cfg.soundFade || g_cfg.soundKeepVolume)   // (the per-step hook they use)
         ok = ok && PatchCall(hot::callSndUpdate, reinterpret_cast<void*>(&HkSndUpdate), 5);
+    if (g_cfg.soundFade)
+        for (DWORD at : hot::callStopAll) ok = ok && PatchCall(at, reinterpret_cast<void*>(&HkStopAll), 5);
+    if (g_cfg.soundFade)
+        for (DWORD at : hot::voiceStop) {
+            BYTE b[6] = { 0x50, 0xE8 };                             // push eax / call FadeStop (stdcall: pops it)
+            DWORD rel = reinterpret_cast<DWORD>(&FadeStop) - (at + 6); memcpy(b + 2, &rel, 4);
+            ok = ok && PatchBytes(at, b, 6);
+        }
+    if (g_cfg.fastLoad) {
+        static const BYTE one = 1;
+        ok = ok && PatchBytes(hot::ioThreadWait + 1, &one, 1) &&
+             PatchCall(hot::callJobsDone, reinterpret_cast<void*>(&HkJobsDone), 5);
     }
     if (g_cfg.soundHeadroom > 0.0f) {
         float t[17]; memcpy(t, reinterpret_cast<void*>(hot::sndVolTable), sizeof(t));
@@ -3709,9 +3998,43 @@ static void InstallSoundFx() {
         for (float& v : t) { v -= d; if (v < -10000.0f) v = -10000.0f; }
         ok = ok && PatchBytes(hot::sndVolTable, t, sizeof(t));
     }
-    Logf(ok ? "sound: %s voices, Doppler %s, %.1f dB headroom\n" : "sound: patch FAILED\n",
+    Logf(ok ? "sound: %s voices, Doppler %s, %.1f dB headroom, EAX reverb %s, fade-outs %s; loading polls %s\n" : "sound: patch FAILED\n",
          g_cfg.soundVoices ? "64" : "the game's",
-         g_cfg.soundDoppler == 2 ? "from the sounds' movement" : g_cfg.soundDoppler ? "the game's" : "off", g_cfg.soundHeadroom);
+         g_cfg.soundDoppler == 2 ? "from the sounds' movement" : g_cfg.soundDoppler ? "the game's" : "off", g_cfg.soundHeadroom,
+         g_cfg.soundEax ? "on (if the device has EAX)" : "off", g_cfg.soundFade ? "on" : "off", g_cfg.fastLoad ? "every 1 ms" : "every 10 ms");
+}
+
+// ---------------------------------------------------------------------------
+// Race loading (fastLoad). Half a race load - 3 s on every track - was step 17
+// of the race loader (GSWorldInitState_c, 0x47AA50) waiting for the drivers'
+// and gunners' models, queued for every car in step 16. Each is a load that
+// moves one state per game step (0x63B7C0: dependencies, stream its archive,
+// wait, build, ...), its archives one state per frame (0x5B6F90), and they go
+// one at a time (a lock, 0x938124: they build in shared globals): ~12 steps a
+// model, 16 models, ~185 steps at 60 a second. Nothing's slow - it's paced.
+// While step 17 waits (its check, 0x47B7E3), the same updates are run again
+// and again - the archives' (0x5B6F90) and the two load managers' (0x63C9F0) -
+// for up to 12 ms an update, so the loading screen still draws at 60 fps; the
+// game's own lock and one-start-a-step still hold. Also the archive I/O
+// thread polls every 1 ms instead of 10 (InstallSoundFx).
+static bool __attribute__((thiscall)) HkJobsDone(BYTE* jobs) {
+    typedef bool (__attribute__((thiscall)) *Done_t)(BYTE*);
+    typedef void (__attribute__((thiscall)) *Tick_t)(void*);
+    Done_t done = reinterpret_cast<Done_t>(hot::fnJobsDone);
+    static double perMs = 0;
+    if (!perMs) { LARGE_INTEGER q; QueryPerformanceFrequency(&q); perMs = q.QuadPart / 1000.0; }
+    LONGLONG t0 = Qpc();
+    for (;;) {
+        if (done(jobs)) return true;                            // (as often as it's asked: each callback once, by its flag)
+        reinterpret_cast<void (__cdecl *)()>(hot::fnArcService)();
+        for (int k = 0; k < 2; k++) {
+            void* mgr = *reinterpret_cast<void**>(jobs + k * 0xC);
+            if (mgr) reinterpret_cast<Tick_t>(hot::fnLoadMgrTick)(mgr);
+        }
+        if ((Qpc() - t0) / perMs > 12.0) break;
+        Sleep(0);                                               // (the I/O thread's turn)
+    }
+    return done(jobs);
 }
 
 // ---------------------------------------------------------------------------
@@ -3778,9 +4101,42 @@ static size_t __cdecl MusicRead(void* ptr, size_t size, size_t n, void* src) {
 }
 static HANDLE WINAPI MusicCreateThread(LPSECURITY_ATTRIBUTES sa, SIZE_T stack, LPTHREAD_START_ROUTINE fn, LPVOID arg,
                                        DWORD flags, LPDWORD id) {
+    // (a new track's refill thread: arg is its stream. Its 3 "segment played"
+    // events (+0x16C, auto-reset) can still be set from the last track - one would
+    // have a segment refilled before it played, skipping ~1/6 s at the start. They
+    // exist exactly while its DS buffer (+0x138) does: made and closed with it,
+    // 0x53B150 / 0x53AE00; the constructor clears +0x138, not the events)
+    if (arg && *reinterpret_cast<void**>(static_cast<BYTE*>(arg) + 0x138))
+        for (int i = 0; i < 3; i++) {
+            HANDLE e = reinterpret_cast<HANDLE*>(static_cast<BYTE*>(arg) + 0x16C)[i];
+            if (e) ResetEvent(e);
+        }
     HANDLE h = CreateThread(sa, stack, fn, arg, flags, id);
     if (h) SetThreadPriority(h, THREAD_PRIORITY_ABOVE_NORMAL);
     return h;
+}
+// ov_read's errors: the decode loop (0x53AF00) retries on OV_HOLE (-3) and
+// OV_EBADLINK (-137), but takes any other negative result as a byte count - a
+// copy of minus some bytes. Those are made 0 (the end of the file: the track
+// loops or ends as it would).
+// An error that doesn't go away (a failed read, a seek that left the file
+// unready) would make that a loop that never moves on - 0, seek to the start, 0
+// again - on an above-normal thread: from the second in a row, silence is
+// returned instead (the length asked for, zeroed), with a short sleep, so the
+// stream keeps moving and can be stopped.
+static long __cdecl HkOvRead(void* vf, char* buf, int len, int big, int word, int sgn, int* bs) {
+    static int errorsInRow = 0;                                 // (the music thread only)
+    long r = reinterpret_cast<long (__cdecl *)(void*, char*, int, int, int, int, int*)>(hot::fnOvRead)(vf, buf, len, big, word, sgn, bs);
+    if (r < 0 && r != -3 && r != -137) {
+        static LONG n = 0;
+        if (InterlockedIncrement(&n) <= 5) Logf("music: decode error %ld\n", r);
+        if (++errorsInRow < 2 || len <= 0) return 0;            // (once: the track's end - it loops or stops)
+        memset(buf, 0, (size_t)len);
+        Sleep(10);
+        return len;
+    }
+    if (r > 0) errorsInRow = 0;
+    return r;
 }
 static void InstallMusicStream() {
     if (!g_cfg.musicStream) return;
@@ -3790,6 +4146,7 @@ static void InstallMusicStream() {
     DWORD cb = reinterpret_cast<DWORD>(&MusicRead);
     ok = ok && PatchBytes(hot::musReadCbMov + 6, &cb, 4);
     ok = ok && PatchCall(hot::callMusThread, reinterpret_cast<void*>(&MusicCreateThread), 6);
+    ok = ok && PatchCall(hot::callOvRead, reinterpret_cast<void*>(&HkOvRead), 5);
     Logf(ok ? "music: stream buffer 1.1 s (game: 0.5), reads of its own, above-normal priority\n" : "music: stream patch FAILED\n");
 }
 
@@ -4199,6 +4556,36 @@ static void InstallTuning() {
 }
 
 // ---------------------------------------------------------------------------
+// Quitting. After the game's main loop returns, the C runtime's exit runs its
+// static destructors - and GSNxAllocator_c's (the PhysX memory pool, 0x4483C0)
+// frees its pool's block, which is gone by then: an access violation at
+// 0x5CF89B as the game quits. Once exit has been called (the game's import of
+// it, hooked), that release only clears the pool's fields: the process is
+// ending, its memory goes with it.
+static volatile bool g_exiting = false;
+typedef void (__cdecl *Exit_t)(int);
+static Exit_t g_crtExit;
+static void __cdecl HkExit(int code) { g_exiting = true; g_crtExit(code); }
+static void __attribute__((thiscall)) HkPoolRelease(BYTE* pool) {
+    if (g_exiting) {
+        memset(pool, 0, 0xC); *reinterpret_cast<DWORD*>(pool + 0x18) = 0;   // (+0, +4, +8, +0x18, as it does)
+        return;
+    }
+    reinterpret_cast<void (__attribute__((thiscall)) *)(BYTE*)>(hot::fnPoolRelease)(pool);
+}
+static void InstallExitFix() {
+    bool hooked = false;
+    ForEachImport("MSVCR80.dll", [&](void** slot, const char* nm) {
+        if (strcmp(nm, "exit")) return;
+        g_crtExit = reinterpret_cast<Exit_t>(*slot);
+        hooked = PatchPointer(slot, reinterpret_cast<void*>(&HkExit));
+    });
+    bool ok = hooked;
+    for (DWORD at : hot::callPoolRelease) ok = ok && PatchCall(at, reinterpret_cast<void*>(&HkPoolRelease), 5);
+    if (!ok) Logf("exit fix: patch FAILED\n");
+}
+
+// ---------------------------------------------------------------------------
 // Crash log: an access violation (or another fatal CPU exception) in HOT.exe's
 // or this ASI's code is written to the log - where (with its offset), the
 // registers, and the code addresses found on the stack - before the game's own
@@ -4288,6 +4675,7 @@ BOOL APIENTRY DllMain(HMODULE h, DWORD reason, LPVOID reserved) {
             InstallMusicAtGo();
             InstallMusicStream();
             InstallSoundFx();
+            InstallExitFix();
             InstallMenuFixes();
             InstallPerf();
             InstallRaceMusic();

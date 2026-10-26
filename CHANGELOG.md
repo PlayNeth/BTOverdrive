@@ -8,6 +8,30 @@ The plugin checks the exe's bytes at every place it patches. If anything differs
 
 ---
 
+## 0.5.2: EAX, sound polish, faster race loading
+
+**EAX (with a wrapper such as DSOAL)**
+- **Reverb by zone:** the game has its own reverb for tunnels, caves and halls, set as you drive through each track's zones, with 9 presets tuned for it. The PC game checks the sound device for EAX and then switches it off again, because its "EAX on" setting is never set. It's now on (`soundEax`). Windows' own DirectSound has no EAX, so this needs a wrapper such as DSOAL (see `dsound-com-redirect.reg`, a separate download).
+- Some zones ask for presets 9–13, which don't exist, so the game read past its table. Those now get the default preset.
+- **Occlusion:** a sound with a wall of the track between it and you is muffled, mostly in the highs, easing in and out. The game fetched every sound's EAX controls and never used them. It uses the game's own line test against the track, a few sounds per step (`soundOcclusion`, `soundOcclusionDb`).
+
+**Sound effects**
+- **Fade-outs instead of clicks:** a sound stopped or cut off to make room for another now fades out over about 50 ms instead of stopping dead (`soundFade`).
+- **Your volumes from the start:** the game played everything at 50% until a profile was loaded. The volumes you confirm in the sound menu are now kept in `BTOverdrive_volume.txt` and applied as soon as the sound starts (`soundKeepVolume`).
+
+**Music**
+- A new track no longer skips about a sixth of a second at its start. Its refill signals could still be set from the previous track.
+- A decoding error no longer feeds the stream garbage or loops forever. The track ends, or plays silence while the error lasts.
+
+**Loading**
+- **Race loads about 3 s faster:** half of every race load was spent waiting for the drivers' and gunners' models, which the game loads one stage per game step, one model at a time. While it waits, those stages now run as many times as fit in each frame, and the loading screen keeps drawing at 60 fps. File reads are also checked every 1 ms instead of every 10 (`fastLoad`).
+- Menu loads are left as the game has them: the same treatment there hung the car select's loading screen.
+
+**Quitting**
+- **No more crash on exit:** the PhysX memory pool's destructor freed memory that was already gone as the game quit (an access violation at `0x5CF89B`). Once the game is exiting, it no longer does.
+
+**New INI keys:** see the table.
+
 ## 0.5.1: sound
 
 **Music**
@@ -245,6 +269,11 @@ HWBTFix 0.3.8's keys, plus the mod's own:
 | `soundVoices` | `1` | Up to 64 sound effects at once (Windows Vista and later gave the game 16). |
 | `soundDoppler` / `soundDopplerScale` | `2` / `1` | Doppler: `2` = from each sound's movement, `1` = the game's, `0` = off; strength. |
 | `soundHeadroom` | `3` | Sound effects this many dB quieter, against clipping. |
+| `soundEax` | `1` | EAX reverb by trigger zone when the sound device has EAX (DSOAL…); `0` = off, as the PC game had it. |
+| `soundOcclusion` / `soundOcclusionDb` | `1` / `15` | With EAX: sounds behind a wall of the track are muffled by this many dB (0–100). |
+| `soundFade` | `1` | Stopped or cut-off sound effects fade out over ~50 ms instead of clicking. |
+| `soundKeepVolume` | `1` | The sound menu's volumes are kept (`BTOverdrive_volume.txt`) and applied from the start. |
+| `fastLoad` | `1` | Faster race loading: the drivers' models load as fast as frames allow; file reads polled every 1 ms [10]. |
 | `scrapeSound` | `1` | The game's metalscrape sound when grinding walls and cars. |
 | `sparkImpactRef` / `sparkImpactMax` / `sparkTwist` | `3800` / `1.6` / `25` | Hit strength for normal-size sparks (`0` = all the same); the biggest hits' size ×; degrees each spark turns off its course. |
 
