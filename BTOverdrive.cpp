@@ -57,7 +57,7 @@
 
 #define MOD_NAME "Beat That! Overdrive"
 #define MOD_FILE "BTOverdrive"                   // .asi, .ini, logs, tuning file
-#define HWBT_VERSION "0.5.2"
+#define HWBT_VERSION "0.5.3-test2"
 #define HWBT_BASE "HWBTFix 0.3.8"
 
 // ---------------------------------------------------------------------------
@@ -139,6 +139,12 @@ namespace hot {
     const DWORD worldFrozen    = 0x960B24;
     const DWORD frameDt        = 0x960B14;   // float: this step's time (set by 0x5A2330; the Flash UI's clock)   // byte: 1 = the world is frozen (pause menu, countdown; set by 0x5A2420)
     // hazard hits (see "Hazard hits")
+    const DWORD callHitRoll    = 0x457CF6;   // call 0x4BACF0 (push 0 / push 1 before it): a weapon hit's roll, in a car's take-hit
+                                             //   (0x457C70, thiscall car, hit; here ebx = the car, esi = the hit: +0 its push direction)
+    const DWORD callBlastHit   = 0x4A38F0;   // call 0x457C70 in an explosion's update (0x4A3610): each car in its reach, a hit of kind 1
+                                             //   (a small push, 0x456290); here esi = the car, edi = the explosion (+0x2C centre, +0x10 reach squared)
+    const DWORD fnTakeHit      = 0x457C70;
+    const DWORD fnStuntStart   = 0x4BACF0;   // the car's stunt controller (car+0x810): start a stunt (thiscall, kind, quiet)
     const DWORD contactFilter  = 0x489090;   // collision: delete a contact? (cdecl, contact*): true = delete it
     const DWORD contactNoIds   = 0x95A464;   //   int[2]: material ids whose contacts are always deleted (-1 = none)
     const DWORD contactDelMsg  = 0x8A89C0;   //   "Deleted contact between material IDs %i, %i\n"
@@ -312,6 +318,11 @@ namespace hot {
         { effRows,        "\x81\xEC\x80\x00\x00\x00", 6 },
         { garageLift,     "\xD9\x85\x7C\x09\x00\x00", 6 },       // fld dword ptr [ebp+0x97C]
         { contactFilter,  "\x56\x8B\x74\x24\x08\x57\x8B\x7E\x30", 9 },   // push esi / mov esi,[esp+8] / push edi / mov edi,[esi+0x30]
+        { 0x457CF2,       "\x6A\x00\x6A\x01\xE8\xF5\x2F\x06\x00", 9 },   // push 0 / push 1 / call 0x4BACF0
+        { 0x4A38EC,       "\x88\x5C\x24\x68\xE8\x7B\x43\xFB\xFF", 9 },   // mov [esp+0x68],bl / call 0x457C70
+        { fnTakeHit,      "\x83\xEC\x0C\x53\x8B\xD9\x80\xBB\xD4\x12\x00\x00\x00", 13 },
+        { fnStuntStart,   "\x51\x53\x8B\x5C\x24\x0C\x56\x57\x8B\xF1\x33\xFF", 12 },
+        { 0x4BAF1F,       "\x80\xBE\x8C\x03\x00\x00\x00", 7 },   // cmp byte [esi+0x38C],0: the roll's push and torque skipped when quiet
         { callKinStep,    "\xE8\x59\x19\x07\x00", 5 },               // call 0x4E6630
         { callGridPlace,  "\xE8\x08\x28\x1C\x00", 5 },               // call 0x63E750
         { callGridReset,  "\xE8\x05\x16\x1C\x00", 5 },               // call 0x63E750
@@ -464,6 +475,11 @@ struct Config {
     int   hazardHits = 1;                // moving track hazards (the graveyard ghoul's hands) throw cars
     float hazardMinSpeed = 50.0f;        // a part must move at least this fast (units/s) to hit
     float hazardReach = 3.0f;            // a part hits within this many times its size (takes in the long fingers, which have no box)
+    int   weaponImpact = 1;              // a weapon hit (rockets, mines, mortar, airstrike) throws the car instead of the canned roll
+    float weaponPush = 70.0f;            //   away from the hit (units/s)
+    float weaponLift = 110.0f;           //   and up (units/s)
+    float weaponTumble = 4.0f;           //   tumbling over away from the hit (radians/s)
+    float weaponSpin = 3.0f;             //   and spinning round, either way (radians/s)
     float hazardPush = 150.0f;           // the car is thrown this fast (units/s) sideways, away from the part
     float hazardLift = 120.0f;           // plus this much upward (units/s)
     float hazardSpin = 6.0f;             // and a tumble (radians/s)
@@ -651,6 +667,19 @@ static const char kIniText[] =
     "; the graveyard gate's panels: 1 = their collision made 3 units thick, so cars can't slip through\n"
     ";   as they swing shut; 0 = as the game has them\n"
     "hazardGateFix=1\n"
+    "; --- weapon hits ---\n"
+    "; a rocket, mine, mortar or airstrike hit throws the car - weaponPush units/s away from the hit,\n"
+    ";   weaponLift up, tumbling over away from it at weaponTumble and spinning round at weaponSpin\n"
+    ";   (radians/s) - instead of the game's roll on the spot; a car caught in an explosion's reach\n"
+    ";   without a direct hit is thrown too, 40-100% as hard by how close it was (the game: a nudge).\n"
+    ";   A direct hit still takes control away while it lasts, as in the game; a car thrown off the\n"
+    ";   track is put back (hazardFallReset). For scale, the ghoul throws 150 out and 120 up.\n"
+    ";   Needs hazardHits=1. 0 = the game's roll\n"
+    "weaponImpact=1\n"
+    "weaponPush=70\n"
+    "weaponLift=110\n"
+    "weaponTumble=4\n"
+    "weaponSpin=3\n"
     "; --- starting grid ---\n"
     "; races start in a grid, as in the trailer (1), or in single file (0); gridColumns: cars side by\n"
     ";   side; gridWidth: between them (units)\n"
@@ -854,6 +883,11 @@ static void LoadConfig() {
         else if (!_stricmp(key, "hazardMinSpeed"))     g_cfg.hazardMinSpeed = (float)atof(val);
         else if (!_stricmp(key, "hazardReach"))        g_cfg.hazardReach = (float)atof(val);
         else if (!_stricmp(key, "hazardPush"))         g_cfg.hazardPush = (float)atof(val);
+        else if (!_stricmp(key, "weaponImpact"))       g_cfg.weaponImpact = n;
+        else if (!_stricmp(key, "weaponPush"))         g_cfg.weaponPush = (float)atof(val);
+        else if (!_stricmp(key, "weaponLift"))         g_cfg.weaponLift = (float)atof(val);
+        else if (!_stricmp(key, "weaponTumble"))       g_cfg.weaponTumble = (float)atof(val);
+        else if (!_stricmp(key, "weaponSpin"))         g_cfg.weaponSpin = (float)atof(val);
         else if (!_stricmp(key, "hazardLift"))         g_cfg.hazardLift = (float)atof(val);
         else if (!_stricmp(key, "hazardSpin"))         g_cfg.hazardSpin = (float)atof(val);
         else if (!_stricmp(key, "hazardFlyTime"))      g_cfg.hazardFlyTime = (float)atof(val);
@@ -2651,6 +2685,9 @@ struct HazardKick {
     bool watch, reset;                          // watching it fall / a put-back is due
     DWORD safe;                                 // when it was put back: no new hit for a while
     float dir[2];                               // the throw's horizontal direction (x, z)
+    float push; DWORD pushMs;                   // its speed along dir kept up to push for pushMs
+    bool weapon;                                // a weapon hit's: no smoke, walls stay walls
+    bool landLogged; float peakY;               //   (logged: how high, how long - test builds)
 };
 static HazardKick g_kicks[16];
 struct HazardCar { BYTE* car; DWORD ms; };                      // race cars seen at their physics sync
@@ -2677,7 +2714,8 @@ static void ApplyHazardKick(BYTE* car) {
         bool airborne = k.watch && k.flying && now - k.flying < 8000;  // hit again in the air: keep where it was
         if (!airborne) memcpy(k.m0, car + 0x10, sizeof(k.m0));         //   first hit (on the track) for the put-back
         k.flying = now ? now : 1;
-        if (g_cfg.hazardSmoke)                                          // a burst of smoke on the swatted car
+        k.peakY = reinterpret_cast<const float*>(car + 0x10)[13]; k.landLogged = false;
+        if (g_cfg.hazardSmoke && !k.weapon)                             // a burst of smoke on the swatted car
             reinterpret_cast<void (__attribute__((thiscall)) *)(BYTE*)>(hot::fnCarDustBall)(car);
         k.watch = g_cfg.hazardFallReset > 0.0f;
         k.reset = false;
@@ -2699,13 +2737,20 @@ static void HazardFallCheck(BYTE* car) {                        // from RegCar
         // The car's own handling takes the sideways speed out within half a second
         // (12 units/s left of 150, in the air too), so the throw keeps pushing for
         // hazardPushTime: its speed along the throw is kept up to hazardPush.
-        if (now - k.flying < (DWORD)(g_cfg.hazardPushTime * 1000.0f)) {
+        if (now - k.flying < k.pushMs) {
             const float* v = reinterpret_cast<const float*>(car + 0x260);
             float along = v[0] * k.dir[0] + v[2] * k.dir[1];
-            if (along < g_cfg.hazardPush) {
-                float add = g_cfg.hazardPush - along;
+            if (along < k.push) {
+                float add = k.push - along;
                 float nv[3] = { v[0] + k.dir[0] * add, v[1], v[2] + k.dir[1] * add };
                 reinterpret_cast<SetVec_t>(hot::fnSetLinVel)(car, nv);
+            }
+        }
+        if (k.weapon && !k.landLogged) {                                // (test builds: how high, how long)
+            if (y > k.peakY) k.peakY = y;
+            if (now - k.flying > 200 && vy <= 0.0f && y <= k.m0[13] + 0.5f) {
+                k.landLogged = true;
+                Logf("weapons: car %p came down after %.2f s, %.1f units up at most\n", car, (now - k.flying) / 1000.0f, k.peakY - k.m0[13]);
             }
         }
         if (!k.watch) continue;
@@ -2770,6 +2815,7 @@ static void QueueKick(BYTE* car, const HazardBox& b, float sp) {
     const float* cp = reinterpret_cast<const float*>(car + 0x10) + 12;
     if (h[0] * (cp[0] - b.pos[0]) + h[2] * (cp[2] - b.pos[2]) < 0.0f) { h[0] = -h[0]; h[2] = -h[2]; }
     k->dir[0] = h[0]; k->dir[1] = h[2];
+    k->push = g_cfg.hazardPush; k->pushMs = (DWORD)(g_cfg.hazardPushTime * 1000.0f); k->weapon = false;
     k->dv[0] = h[0] * g_cfg.hazardPush;
     k->dv[1] = g_cfg.hazardLift;
     k->dv[2] = h[2] * g_cfg.hazardPush;
@@ -2781,6 +2827,122 @@ static void QueueKick(BYTE* car, const HazardBox& b, float sp) {
     if (++g_hzKicks <= 30)
         Logf("hazards: box %p (moving %.1f units/s) hit car %p%s: velocity +(%.1f %.1f %.1f)\n", b.box, sp, car,
              *reinterpret_cast<DWORD*>(car) == 0x8A0384 ? " (you)" : "", k->dv[0], k->dv[1], k->dv[2]);
+}
+// ---------------------------------------------------------------------------
+// Weapon hits. A rocket, mine, mortar shell or airstrike bomb that hits a car
+// calls its take-hit (0x457C70) with a hit of kind 2 - and kind 2 starts the
+// car's stunt controller (car+0x810) on stunt 1 (0x4BACF0): for 0.8 s a torque
+// about the car's own length (200 x mass) and a push toward the ground (75 x
+// mass) each step - a barrel roll on the spot - then 0.5 s more and until it's
+// settled, controls off. weaponImpact: the roll is started "quiet" instead (its
+// second argument, +0x38C: the push and torque skipped, 0x4BAF1F; the loss of
+// control and the timing as before), and the car is thrown like a hazard's
+// throw (the same kick at its physics sync, the same put-back if it falls off
+// the track - not the flight through walls): weaponPush away from the hit - the
+// hit's own direction (+0: from a mine to the car, a rocket's flight) along the
+// ground - and weaponLift up, tumbling over away from it and spinning round.
+// ---------------------------------------------------------------------------
+static LONG g_wpLogged = 0;
+static DWORD g_wpRand = 0x2545F491;
+static float WpRand() { g_wpRand = g_wpRand * 1664525u + 1013904223u; return (g_wpRand >> 8) / 16777216.0f; }   // 0..1
+static bool WpnThrow(BYTE* car, const float* hit, float strength, const char* what) {
+    DWORD vt = *reinterpret_cast<DWORD*>(car);
+    if (vt != 0x8A0384 && vt != 0x8A0144 && vt != 0x8A3FA4) return false;   // race cars only
+    DWORD now = GetTickCount();
+    HazardKick* k = nullptr;
+    for (HazardKick& e : g_kicks) if (e.car == car) { k = &e; break; }
+    if (k && (k->pending || (k->weapon && k->flying && now - k->flying < 400))) return true;   // (one blast, one throw: quiet anyway)
+    if (!k) {
+        for (HazardKick& e : g_kicks) if (!e.pending && !e.reset && (!k || now - e.ms > now - k->ms)) k = &e;
+        if (!k) return false;                                   // (no room: the game's roll)
+    }
+    if (k->car != car) { k->safe = 0; k->flying = 0; k->watch = k->reset = false; }
+    // along the ground, away from the hit; none (a hit from straight above): to a random side
+    float h[3] = { hit[0], 0.0f, hit[2] };
+    float hl = sqrtf(Dot3(h, h));
+    if (hl > 0.2f) { h[0] /= hl; h[2] /= hl; }
+    else {
+        const float* right = reinterpret_cast<const float*>(car + 0x10);
+        h[0] = right[0]; h[2] = right[2]; hl = sqrtf(h[0] * h[0] + h[2] * h[2]);
+        if (hl < 0.01f) { h[0] = 1.0f; h[2] = 0.0f; hl = 1.0f; }
+        float sgn = WpRand() < 0.5f ? -1.0f : 1.0f;
+        h[0] *= sgn / hl; h[2] *= sgn / hl;
+    }
+    k->car = car; k->ms = now;
+    k->weapon = true;
+    k->dir[0] = h[0]; k->dir[1] = h[2];
+    float vary = (0.85f + 0.3f * WpRand()) * strength;          // (no two hits quite the same)
+    k->push = g_cfg.weaponPush * vary; k->pushMs = 250;         // (kept up for a moment, as a hazard's throw)
+    k->dv[0] = h[0] * g_cfg.weaponPush * vary;
+    k->dv[1] = g_cfg.weaponLift * vary;
+    k->dv[2] = h[2] * g_cfg.weaponPush * vary;
+    float spin = g_cfg.weaponSpin * strength * (WpRand() < 0.5f ? -1.0f : 1.0f) * (0.5f + WpRand());
+    k->w[0] = h[2] * g_cfg.weaponTumble * vary;                 // over, away from the hit (the top goes along h)
+    k->w[1] = spin;                                             // and round
+    k->w[2] = -h[0] * g_cfg.weaponTumble * vary;
+    InterlockedIncrement(&g_kicksPending);
+    InterlockedExchange(&k->pending, 1);
+    if (++g_wpLogged <= 30) {
+        const float* v = reinterpret_cast<const float*>(car + 0x260);
+        Logf("weapons: car %p%s %s (direction %.2f %.2f %.2f, x%.2f): thrown +(%.1f %.1f %.1f), spinning (%.1f %.1f %.1f); it was doing (%.1f %.1f %.1f)\n",
+             car, vt == 0x8A0384 ? " (you)" : "", what, hit[0], hit[1], hit[2], strength, k->dv[0], k->dv[1], k->dv[2],
+             k->w[0], k->w[1], k->w[2], v[0], v[1], v[2]);
+    }
+    return true;
+}
+extern "C" bool __cdecl WpnHitNote(BYTE* car, const float* hit) {          // a direct hit (its roll: quiet if thrown)
+    if (!g_cfg.weaponImpact || !g_hzOn || !car || !hit) return false;
+    return WpnThrow(car, hit, 1.0f, "hit");
+}
+// A car in an explosion's reach without a direct hit got only a nudge (kind 1:
+// 0.5 x mass x a force, 0x456290). It's thrown too, by how close it was to the
+// centre: 100% there, 40% at the edge. Unless the game passes it over (shielded,
+// or just hit - 0x457C70's own checks: +0x12D4, the hit-again timer's flag at
+// +0x1300 unless the hit overrides it, +0x21); and a car thrown a moment ago by
+// the same blast's direct hit isn't thrown twice (WpnThrow).
+extern "C" void __cdecl BlastHitNote(BYTE* car, const BYTE* hit, const BYTE* blast) {
+    if (!g_cfg.weaponImpact || !g_hzOn || !car || !hit || !blast) return;
+    if (*reinterpret_cast<const int*>(hit + 0x10) != 1) return;
+    if (car[0x12D4] || (car[0x1300] && !hit[0x21])) return;
+    const float* c = reinterpret_cast<const float*>(car + 0x40);
+    const float* o = reinterpret_cast<const float*>(blast + 0x2C);
+    float d[3] = { c[0] - o[0], c[1] - o[1], c[2] - o[2] };
+    float r2 = *reinterpret_cast<const float*>(blast + 0x10);
+    float f = r2 > 0.0f ? 1.0f - sqrtf(Dot3(d, d) / r2) : 0.0f;
+    f = f < 0.0f ? 0.0f : f > 1.0f ? 1.0f : f;
+    WpnThrow(car, reinterpret_cast<const float*>(hit), 0.4f + 0.6f * f, "caught in a blast");
+}
+extern "C" { DWORD g_stuntStart = hot::fnStuntStart; DWORD g_takeHit = hot::fnTakeHit; }   // (the stub jumps on through it)
+extern "C" void WpnRollStub(); extern "C" void BlastHitStub();
+asm(".text\n"
+    ".globl _WpnRollStub\n_WpnRollStub:\n"   // replaces call 0x4BACF0 at 0x457CF6 (ecx = the stunt controller; args 1, 0)
+    "    pushl %ecx\n"
+    "    pushl %esi\n"                         // the hit
+    "    pushl %ebx\n"                         // the car
+    "    call _WpnHitNote\n"
+    "    addl $8, %esp\n"
+    "    popl %ecx\n"
+    "    testb %al, %al\n"
+    "    jz 1f\n"
+    "    movl $1, 8(%esp)\n"                   // thrown: the roll quiet
+    "1:  jmp *_g_stuntStart\n"
+    ".globl _BlastHitStub\n_BlastHitStub:\n"  // replaces call 0x457C70 at 0x4A38F0 (ecx = esi = the car; arg: the hit; edi = the explosion)
+    "    pushl %ecx\n"
+    "    pushl %edi\n"                         // the explosion
+    "    pushl 12(%esp)\n"                     // the hit
+    "    pushl %ecx\n"                         // the car
+    "    call _BlastHitNote\n"
+    "    addl $12, %esp\n"
+    "    popl %ecx\n"
+    "    jmp *_g_takeHit\n");
+static void InstallWeaponImpact() {
+    if (!g_cfg.weaponImpact) { Logf("weapons: the game's roll on a hit (weaponImpact=0)\n"); return; }
+    if (!g_hzOn) { Logf("weapons: the game's roll on a hit (weaponImpact needs hazardHits=1)\n"); return; }
+    g_wpRand ^= GetTickCount();
+    if (!PatchCall(hot::callHitRoll, reinterpret_cast<void*>(&WpnRollStub), 5) ||
+        !PatchCall(hot::callBlastHit, reinterpret_cast<void*>(&BlastHitStub), 5)) { Logf("weapons: patch FAILED\n"); return; }
+    Logf("weapons: a hit or a blast throws the car (push %.1f, lift %.1f, tumble %.1f, spin %.1f)\n",
+         g_cfg.weaponPush, g_cfg.weaponLift, g_cfg.weaponTumble, g_cfg.weaponSpin);
 }
 // A part's size (its mesh's, +0x88), or null.
 static const float* PartSize(BYTE* box) {
@@ -2849,7 +3011,7 @@ extern "C" bool __cdecl HkContactFilter(BYTE* c) {
     if (g_cfg.hazardFlyTime > 0.0f && fabsf(n[1]) < 0.6f) {
         DWORD now = GetTickCount();
         for (HazardKick& k : g_kicks)
-            if (k.car == car && k.flying && now - k.flying < (DWORD)(g_cfg.hazardFlyTime * 1000.0f)) {
+            if (k.car == car && k.flying && !k.weapon && now - k.flying < (DWORD)(g_cfg.hazardFlyTime * 1000.0f)) {
                 if (++g_hzWallsLogged <= 5)
                     Logf("hazards: thrown car %p through a wall (materials %d, %d)\n", car, idA, idB);
                 return true;
@@ -4683,6 +4845,7 @@ BOOL APIENTRY DllMain(HMODULE h, DWORD reason, LPVOID reserved) {
             InstallCloseExits();
             InstallTuning();
             InstallHazards();
+            InstallWeaponImpact();
             InstallGrid();
             InstallStartBoost();
             InstallAI();
