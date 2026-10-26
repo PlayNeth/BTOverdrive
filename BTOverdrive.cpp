@@ -57,7 +57,7 @@
 
 #define MOD_NAME "Beat That! Overdrive"
 #define MOD_FILE "BTOverdrive"                   // .asi, .ini, logs, tuning file
-#define HWBT_VERSION "0.5.3-test5"
+#define HWBT_VERSION "0.5.3-test6"
 #define HWBT_BASE "HWBTFix 0.3.8"
 
 // ---------------------------------------------------------------------------
@@ -495,6 +495,10 @@ struct Config {
     float weaponForward = 35.0f;         //   a rocket or mortar: thrown along (units/s)
     float weaponForwardLift = 45.0f;     //   and up (units/s)
     float weaponForwardTumble = 6.0f;    //   flipping end over end (radians/s)
+    float weaponMortar = 1.4f;           //   a mortar shell: that x this
+    float weaponFlyTime = 2.0f;          // a thrown car passes through the invisible walls (weaponWallMats) for this long (s)
+    int   weaponWallMats[8] = { 12 };    //   their collision material ids
+    int   weaponWallMatCount = 1;
     float weaponTumble = 4.0f;           //   tumbling over away from the hit (radians/s)
     float weaponSpin = 3.0f;             //   and spinning round, either way (radians/s)
     float hazardPush = 150.0f;           // the car is thrown this fast (units/s) sideways, away from the part
@@ -706,6 +710,13 @@ static const char kIniText[] =
     "weaponForward=35\n"
     "weaponForwardLift=45\n"
     "weaponForwardTumble=6\n"
+    "; a mortar shell throws this many times as hard as a rocket\n"
+    "weaponMortar=1.4\n"
+    "; a car thrown by a weapon passes through the track's invisible walls for weaponFlyTime seconds,\n"
+    ";   as a hazard's throw does - not the real walls. weaponWallMats: the invisible walls' collision\n"
+    ";   material ids (comma-separated; the log names the walls thrown cars meet)\n"
+    "weaponFlyTime=2\n"
+    "weaponWallMats=12\n"
     "weaponTumble=4\n"
     "weaponSpin=3\n"
     "; --- starting grid ---\n"
@@ -917,6 +928,19 @@ static void LoadConfig() {
         else if (!_stricmp(key, "weaponForward"))      g_cfg.weaponForward = (float)atof(val);
         else if (!_stricmp(key, "weaponForwardLift"))  g_cfg.weaponForwardLift = (float)atof(val);
         else if (!_stricmp(key, "weaponForwardTumble")) g_cfg.weaponForwardTumble = (float)atof(val);
+        else if (!_stricmp(key, "weaponMortar"))       g_cfg.weaponMortar = (float)atof(val);
+        else if (!_stricmp(key, "weaponFlyTime"))      g_cfg.weaponFlyTime = (float)atof(val);
+        else if (!_stricmp(key, "weaponWallMats")) {
+            g_cfg.weaponWallMatCount = 0;
+            for (const char* q = val; *q && g_cfg.weaponWallMatCount < 8; ) {
+                while (*q == ' ' || *q == ',') q++;
+                if (!*q) break;
+                char* e; long v = strtol(q, &e, 10);
+                if (e == q) break;
+                g_cfg.weaponWallMats[g_cfg.weaponWallMatCount++] = (int)v;
+                q = e;
+            }
+        }
         else if (!_stricmp(key, "weaponTumble"))       g_cfg.weaponTumble = (float)atof(val);
         else if (!_stricmp(key, "weaponSpin"))         g_cfg.weaponSpin = (float)atof(val);
         else if (!_stricmp(key, "hazardLift"))         g_cfg.hazardLift = (float)atof(val);
@@ -2984,8 +3008,8 @@ static void QueueKick(BYTE* car, const HazardBox& b, float sp) {
 static LONG g_wpLogged = 0;
 static DWORD g_wpRand = 0x2545F491;
 static float WpRand() { g_wpRand = g_wpRand * 1664525u + 1013904223u; return (g_wpRand >> 8) / 16777216.0f; }   // 0..1
-enum { kWpUp = 0, kWpForward = 1 };                            // a blast's kind: thrown up and away / shoved along
-static const char* const kWpKind[2] = { "up", "forward" };
+enum { kWpUp = 0, kWpForward = 1, kWpMortar = 2 };            // a blast's kind: thrown up and away / shoved along (x weaponMortar)
+static const char* const kWpKind[3] = { "up", "forward", "mortar" };
 static bool WpnThrow(BYTE* car, const float* hit, float strength, int kind, bool alongHit, const char* what) {
     DWORD vt = *reinterpret_cast<DWORD*>(car);
     if (vt != 0x8A0384 && vt != 0x8A0144 && vt != 0x8A3FA4) return false;   // race cars only
@@ -3001,7 +3025,7 @@ static bool WpnThrow(BYTE* car, const float* hit, float strength, int kind, bool
     // along the ground: away from the hit, or (shoved along) the hit's way - a rocket's flight -
     // or the car's own; none (a hit from straight above): to a random side
     const float* fwd = reinterpret_cast<const float*>(car + 0x30);   // the car's row 2: its front
-    const float* src = kind == kWpForward && !alongHit ? fwd : hit;
+    const float* src = kind != kWpUp && !alongHit ? fwd : hit;
     float h[3] = { src[0], 0.0f, src[2] };
     float hl = sqrtf(Dot3(h, h));
     if (hl > 0.2f) { h[0] /= hl; h[2] /= hl; }
@@ -3016,12 +3040,13 @@ static bool WpnThrow(BYTE* car, const float* hit, float strength, int kind, bool
     k->weapon = true;
     k->dir[0] = h[0]; k->dir[1] = h[2];
     float vary = (0.85f + 0.3f * WpRand()) * strength;          // (no two hits quite the same)
-    bool up = kind != kWpForward;
-    float push = (up ? g_cfg.weaponPush : g_cfg.weaponForward) * vary;
+    bool up = kind == kWpUp;
+    float scale = kind == kWpMortar ? g_cfg.weaponMortar : 1.0f;
+    float push = (up ? g_cfg.weaponPush : g_cfg.weaponForward * scale) * vary;
     float tumble = (up ? g_cfg.weaponTumble : g_cfg.weaponForwardTumble) * vary;   // (shoved along: end over end)
     k->push = push; k->pushMs = up ? 250 : 0;                   // (kept up for a moment, as a hazard's throw; along: no more than the hit)
     k->dv[0] = h[0] * push;
-    k->dv[1] = (up ? g_cfg.weaponLift : g_cfg.weaponForwardLift) * vary;
+    k->dv[1] = (up ? g_cfg.weaponLift : g_cfg.weaponForwardLift * scale) * vary;
     k->dv[2] = h[2] * push;
     float spin = g_cfg.weaponSpin * strength * (up ? 1.0f : 0.5f) * (WpRand() < 0.5f ? -1.0f : 1.0f) * (0.5f + WpRand());
     k->w[0] = h[2] * tumble;                                    // over, away from the hit (the top goes along h)
@@ -3041,7 +3066,7 @@ static bool WpnThrow(BYTE* car, const float* hit, float strength, int kind, bool
 extern "C" bool __cdecl WpnHitNote(BYTE* car, const float* hit, DWORD from) {   // a direct hit (its roll: quiet if thrown)
     if (!g_cfg.weaponImpact || !g_hzOn || !car || !hit) return false;
     if (from == hot::hitRetRocket) return WpnThrow(car, hit, 1.0f, kWpForward, true, "hit by a rocket");
-    if (from == hot::hitRetMortar) return WpnThrow(car, hit, 1.0f, kWpForward, false, "hit by a mortar shell");
+    if (from == hot::hitRetMortar) return WpnThrow(car, hit, 1.0f, kWpMortar, false, "hit by a mortar shell");
     return WpnThrow(car, hit, 1.0f, kWpUp, false, "hit");
 }
 // Each explosion is tagged, as it's set off, with what set it off (its object is
@@ -3078,7 +3103,7 @@ extern "C" void __cdecl BlastHitNote(BYTE* car, const BYTE* hit, const BYTE* bla
     WpnThrow(car, reinterpret_cast<const float*>(hit), 0.4f + 0.6f * f, BlastKind(blast), false, "caught in a blast");
 }
 extern "C" { DWORD g_stuntStart = hot::fnStuntStart; DWORD g_takeHit = hot::fnTakeHit; DWORD g_blastMake = hot::fnBlastMake; }   // (the stub jumps on through it)
-extern "C" void WpnRollStub(); extern "C" void BlastHitStub(); extern "C" void BlastMakeUpStub(); extern "C" void BlastMakeFwdStub();
+extern "C" void WpnRollStub(); extern "C" void BlastHitStub(); extern "C" void BlastMakeUpStub(); extern "C" void BlastMakeFwdStub(); extern "C" void BlastMakeMortarStub();
 asm(".text\n"
     ".globl _WpnRollStub\n_WpnRollStub:\n"   // replaces call 0x4BACF0 at 0x457CF6 (ecx = the stunt controller; args 1, 0)
     "    pushl %ecx\n"
@@ -3104,8 +3129,11 @@ asm(".text\n"
     ".globl _BlastMakeUpStub\n_BlastMakeUpStub:\n"       // replaces call 0x4A3950 (ecx = the explosion): a mine's, a bomb's
     "    movl $0, _g_blastKindNext\n"
     "    jmp 2f\n"
-    ".globl _BlastMakeFwdStub\n_BlastMakeFwdStub:\n"     //   a rocket's, a mortar shell's
+    ".globl _BlastMakeFwdStub\n_BlastMakeFwdStub:\n"     //   a rocket's
     "    movl $1, _g_blastKindNext\n"
+    "    jmp 2f\n"
+    ".globl _BlastMakeMortarStub\n_BlastMakeMortarStub:\n"   //   a mortar shell's
+    "    movl $2, _g_blastKindNext\n"
     "2:  pushl %ecx\n"
     "    pushl _g_blastKindNext\n"
     "    pushl %ecx\n"
@@ -3120,13 +3148,17 @@ static void InstallWeaponImpact() {
     if (!PatchCall(hot::callHitRoll, reinterpret_cast<void*>(&WpnRollStub), 5) ||
         !PatchCall(hot::callBlastHit, reinterpret_cast<void*>(&BlastHitStub), 5)) { Logf("weapons: patch FAILED\n"); return; }
     for (int i = 0; i < 6; i++) {                               // (mortar, rocket, homing rocket: shoved along; the rest: up)
-        bool fwd = i < 3;
-        if (!PatchCall(hot::callBlastMake[i], reinterpret_cast<void*>(fwd ? &BlastMakeFwdStub : &BlastMakeUpStub), 5))
+        void* stub = i == 0 ? reinterpret_cast<void*>(&BlastMakeMortarStub) : i < 3 ? reinterpret_cast<void*>(&BlastMakeFwdStub)
+                                                                                    : reinterpret_cast<void*>(&BlastMakeUpStub);
+        if (!PatchCall(hot::callBlastMake[i], stub, 5))
             Logf("weapons: explosion tag %d FAILED (its blasts: up)\n", i);
     }
+    char mats[64] = ""; int at = 0;
+    for (int i = 0; i < g_cfg.weaponWallMatCount && at < 56; i++) at += snprintf(mats + at, sizeof(mats) - at, i ? ",%d" : "%d", g_cfg.weaponWallMats[i]);
     Logf("weapons: a hit or a blast throws the car - mines and bombs %.1f out, %.1f up (tumble %.1f); rockets and "
-         "mortar %.1f along, %.1f up (flip %.1f); spin %.1f\n", g_cfg.weaponPush, g_cfg.weaponLift, g_cfg.weaponTumble,
-         g_cfg.weaponForward, g_cfg.weaponForwardLift, g_cfg.weaponForwardTumble, g_cfg.weaponSpin);
+         "mortar %.1f along, %.1f up (flip %.1f; mortar x%.2f); spin %.1f; through walls of material %s for %.1f s\n",
+         g_cfg.weaponPush, g_cfg.weaponLift, g_cfg.weaponTumble, g_cfg.weaponForward, g_cfg.weaponForwardLift,
+         g_cfg.weaponForwardTumble, g_cfg.weaponMortar, g_cfg.weaponSpin, at ? mats : "(none)", g_cfg.weaponFlyTime);
 }
 // A part's size (its mesh's, +0x88), or null.
 static const float* PartSize(BYTE* box) {
@@ -3185,13 +3217,25 @@ static void HazardStep(BYTE* set) {                             // (after the ga
 // filter (0x489090) about each contact, and contacts of a flying car whose normal
 // is level (a wall, not the ground: |y| < 0.6) are deleted. The rest is 0x489090
 // as it was.
-static LONG g_hzWallsLogged = 0;
+static LONG g_hzWallsLogged = 0, g_wpWallsLogged = 0;
 typedef void (__cdecl *BoxHit_t)(BYTE* box, BYTE* car);
 extern "C" bool __cdecl HkContactFilter(BYTE* c) {
     BYTE* car = *reinterpret_cast<BYTE**>(c + 0x30);
     if (!car || *reinterpret_cast<DWORD*>(c + 0x34)) return false;
     int idA = *reinterpret_cast<int*>(c + 0x28), idB = *reinterpret_cast<int*>(c + 0x2C);
     const float* n = reinterpret_cast<const float*>(c + 0xC);          // the contact normal
+    if (fabsf(n[1]) < 0.6f && idA != idB) {                   // (a wall, not another car)
+        DWORD now = GetTickCount();
+        for (HazardKick& k : g_kicks) {
+            if (k.car != car || !k.flying || !k.weapon || now - k.flying >= (DWORD)(g_cfg.weaponFlyTime * 1000.0f)) continue;
+            bool pass = false;
+            for (int i = 0; i < g_cfg.weaponWallMatCount && !pass; i++)
+                pass = idA == g_cfg.weaponWallMats[i] || idB == g_cfg.weaponWallMats[i];
+            if (++g_wpWallsLogged <= 30)
+                Logf("weapons: thrown car %p met a wall (materials %d, %d): %s\n", car, idA, idB, pass ? "through it" : "blocked");
+            if (pass) return true;
+        }
+    }
     if (g_cfg.hazardFlyTime > 0.0f && fabsf(n[1]) < 0.6f) {
         DWORD now = GetTickCount();
         for (HazardKick& k : g_kicks)
