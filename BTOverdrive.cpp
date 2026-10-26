@@ -1,5 +1,5 @@
-// HWBTMod.asi  v0.1.0
-// Gameplay mod for Hot Wheels: Beat That! (PC, HOT.exe), forked from HWBTFix
+// BTOverdrive.asi - Beat That! Overdrive (formerly HWBTMod)
+// Gameplay and rendering mod for Hot Wheels: Beat That! (PC, HOT.exe), forked from HWBTFix
 // 0.3.8 (the vanilla fixes: portable install, high frame rate, music...). Use
 // one or the other: whichever loads second finds the game already patched and
 // stays off.
@@ -22,7 +22,7 @@
 //    built in 0x40E280 with SHGetSpecialFolderLocation at 0x40E3E1).
 //
 // What this ASI does:
-//  - portableRegistry: the game's registry key is answered from HWBTMod.ini
+//  - portableRegistry: the game's registry key is answered from BTOverdrive.ini
 //    (width/height/detail keys); nothing is read from or written to the
 //    Windows registry for it. Other keys (CPU info) are untouched.
 //  - width/height: any resolution (0 = desktop resolution); the 1024..1600
@@ -30,14 +30,20 @@
 //  - saveFolder: saves and Settings.cfg in a folder in the game root, above
 //    Bin (default "save"); existing ones are copied over from Documents on first run.
 //  - DisplayConfig.exe is never launched (settings are in the ini).
-//  - interpolate/fpsLimit: frames above 60 fps, with cars, cameras and other
-//    moving objects drawn between their last two 60 Hz simulation steps (see
+//  - interpolate/fpsLimit: frames above 60 fps, with cars, cameras, other
+//    moving objects and animated models' bones drawn between their last two 60 Hz simulation steps (see
 //    "Frame rate"); effects, shadows and trails that follow a car included.
 //  - closeExits: closing the window quits the game cleanly (like Alt+F4).
 //  - raceMusic: each race plays its own song, results music plays (the PC
 //    port's song-name lookup was a stub).
 //  - gameLog: diagnostics - the game's own debug messages (an empty function in
-//    the release build) and failed sound lookups to HWBTMod_game.log.
+//    the release build) and failed sound lookups to BTOverdrive_game.log.
+//  - and the mod's own (each section below has the details): the ghoul throws
+//    cars, the gate's collision, the F1-style grid, the start boost dial, the
+//    AI, Rampage; speed FOV, blur and shake; sparks; sun shadows, glass, HDR
+//    glare, the sky; animated models interpolated; the scrape sound, race music
+//    at GO; the 2D half-pixel offset and the track select's name; the tuning
+//    log/file, frame timing and a crash log in BTOverdrive.log.
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -49,7 +55,9 @@
 #include <cmath>
 #include <mmsystem.h>
 
-#define HWBT_VERSION "0.4.1"
+#define MOD_NAME "Beat That! Overdrive"
+#define MOD_FILE "BTOverdrive"                   // .asi, .ini, logs, tuning file
+#define HWBT_VERSION "0.5.0"
 #define HWBT_BASE "HWBTFix 0.3.8"
 
 // ---------------------------------------------------------------------------
@@ -69,8 +77,17 @@ namespace hot {
     const DWORD fnStepTail     = 0x4210B0;
     const DWORD callRender3D   = 0x40EC98;   // call 0x421160: the 3D pass
     const DWORD fnRender3D     = 0x421160;
+    const DWORD boneFetch      = 0x54AF55;   // skinned draw: esi = &bones[index[i]] (15 bytes), then copied to g_BoneMatrices
     const DWORD callFrameEnd   = 0x40ECB0;   // call 0x54DC30 (thiscall, renderer): after the 2D pass and the flush
     const DWORD fnFrameEnd     = 0x54DC30;
+    const DWORD callGameStep   = 0x40EC53;   // call 0x59B3F0: a 60 Hz step's update (perf timing)
+    const DWORD fnGameStep     = 0x59B3F0;
+    const DWORD call2D1        = 0x40EC9D;   // call 0x421100 (2D pass)
+    const DWORD fn2D1          = 0x421100;
+    const DWORD call2D2        = 0x40ECA2;   // call 0x421150
+    const DWORD fn2D2          = 0x421150;
+    const DWORD callFlush      = 0x40ECA9;   // call 0x54DA00 (thiscall, renderer): the renderer's flush - every draw call
+    const DWORD fnFlush        = 0x54DA00;
     const DWORD carSync        = 0x5FB260;   // car -> physics bodies, once per car per step
     const DWORD camApply       = 0x5BA4C0;   // Camera::Apply (sets the view from camera+0x10)
     const DWORD vehDraw        = 0x604B20;   // GSVehicle draw (vtable slot 3 of VehicleMover, via GSVehicle_c)
@@ -127,8 +144,6 @@ namespace hot {
     const DWORD contactDelMsg  = 0x8A89C0;   //   "Deleted contact between material IDs %i, %i\n"
     const DWORD fnCarReset     = 0x433F90;   // GSResetOnTrackAP_c: put car +0x60 on the track at matrix +0x10 (thiscall)
     const DWORD fnCarDustBall  = 0x453A20;   // race car: a "DustBall" smoke burst on it (thiscall; the hazards' own hit effect)
-    const DWORD fnKinPose      = 0x5F2070;   // box pose from its part (thiscall, box; float out[16]): part matrix x mesh matrix
-    const DWORD callKinPose[2] = { 0x4E668E, 0x4E68FB };   //   its calls: each step (0x4E6630) and at setup (0x4E67F0)
     // starting grid (see "Starting grid")
     const DWORD callGridPlace  = 0x47BF43;   // call 0x63E750 in GSWorldInitState_c: put racer on its grid action point
     const DWORD callGridReset  = 0x47D146;   //   the same in GSWorldResetState_c (race restart)
@@ -144,7 +159,45 @@ namespace hot {
     const DWORD rampageTopSpd  = 0x92EA20;   // float 0.45: a Rampage AI car's TOP-SPEED = the player's x this (0x456FEA, its only user)
     const DWORD callBrainTargets = 0x670EAE; // call 0x648B50 in the AI brain update: fill the car's target points
     const DWORD blurFlagLevel  = 0x57287C;   // 0x5726C0: jne past "level's g_MotionBlur sets +0x31C" (75 18 -> EB 18: always past)
+    const DWORD callHdrPrint   = 0x5727EE;   // call 0x5890F0 ("+%s: %f": each HDR region setting, after it's set)
     const DWORD blurAmount     = 0x575F65;   // post-processing: mov ecx,[ebx+0x234] right before g_MotionBlurAmount is set (amount at [esp+0x10])
+    const DWORD shadowTexMake  = 0x57D7BA;   // shadow map: mov eax,[edi+0xB8] ... device->CreateTexture(8, 8, 1, RT, R32F) ... (to 0x57D7E7)
+    const DWORD shadowTexEnd   = 0x57D7E7;
+    const DWORD shadowDepthMake = 0x57D7F8;  // mov edi,[edi+0xB8] ... device->CreateDepthStencilSurface(8, 8, D24X8) (to 0x57D815)
+    const DWORD shadowDepthEnd = 0x57D815;
+    const DWORD shadowViewport = 0x57C28F;   // shadow caster pass: mov edi,8 (viewport width/height)
+    const DWORD shadowSizeParam = 0x54A70D;  // fld dword ptr [0x8A57CC] (8.0; 14 other users) -> g_ShadowMapSize
+    const DWORD shadowDepthK   = 0x8A0988;   // float 64: the sun shadow's depth along the camera (one user, 0x43606E)
+    const DWORD shadowFadeK    = 0x8A0984;   // float 16: its fade width / back-off (one user, 0x43608B)
+    const DWORD shadowWideK    = 0x8A0978;   // float 128: its width (one user, 0x4360E3)
+    const DWORD alphaSort      = 0x54B8F8;   // alpha pass: cmp eax,4 / mov ecx,[esi+0x10] - its own sort by pass only (to 0x54BB17)
+    const DWORD alphaSortEnd   = 0x54BB17;   // ...where the first mesh list's sort starts (to 0x54BD77)
+    const DWORD meshSort2      = 0x54BD77;   // the second mesh list's sort (to 0x54BFE7)
+    const DWORD meshSortEnd    = 0x54BFE7;
+    const DWORD callBlendMode  = 0x547204;   // call 0x5420F0 (thiscall renderer, mode): a material's blend mode
+    const DWORD fnBlendMode    = 0x5420F0;
+    const DWORD fnZWrite       = 0x541FE0;   // renderer: depth writing on/off (thiscall, byte) - through its state cache
+    const DWORD skyFarLd       = 0x53E7B9;   // sky pass: fld dword ptr [0x8AA444] (5000: its far plane)
+    const DWORD skySetWorld1   = 0x53E84F;   // mov edx,[eax+0x224] (the renderer's SetWorld, called at 0x53E907 for the sky)
+    const DWORD skySetWorld2   = 0x53EA33;   //   the same for the second sky instance (called at 0x53EAEB)
+    const DWORD shadowBackOffLd = 0x64D084;  // fld dword ptr [0x9698F0]: the shadow light's back-off toward the sun
+    const DWORD shadowFarLd    = 0x64DDF9;   // fld dword ptr [0x969910]: its far plane
+    const DWORD shadowFadeLd   = 0x64DE17;   // fld dword ptr [0x969924]: the fade width for the shaders
+    const DWORD callContactCopy1 = 0x65B2F1; // call 0x5C41C0: the surface's contact sample into car+0x13C (world scrape)
+    const DWORD callContactCopy2 = 0x65B501; //   the same, car-vs-car scrape
+    const DWORD ui2DYSub[3]    = { 0x53C28A, 0x55A0EA, 0x53C349 };   // fsubrp st(1),st: 2D vertex y = H/2 - y - 0.5
+    const DWORD callTrackName  = 0x48073C;   // call 0x59D840: the track select's name text, on left/right
+    const DWORD fnStrFormat    = 0x59D840;   // string object: set from a format (cdecl: dst, fmt, ...; fmt itself a string object)
+    const DWORD vtScrollDlgUpd = 0x8C53D8;   // CSII_ScrollDialog vtable +0x14: its update (0x681160, thiscall)
+    const DWORD fnMusicPlay    = 0x538C20;   // Music: play the opened track (cdecl, no args)
+    const DWORD callIntroPlay  = 0x479780;   // call 0x538C20: race intro, every frame of the 3-2-1 countdown
+    const DWORD movIntroGo     = 0x4797BF;   // mov byte ptr [0x959F80],0: the countdown's GO (7 bytes)
+    const DWORD callPauseResume1 = 0x47E6D2; // call 0x538C20: leaving the pause menu, music not paused
+    const DWORD callPauseResume2 = 0x47EEF0;
+    const DWORD introActive    = 0x959F80;   // byte: 1 while a race intro / countdown is on
+    const DWORD fnSndCopy      = 0x5C41C0;   // sound handle: copy another (thiscall, src; ret 4)
+    const DWORD fnSndBind      = 0x5C38E0;   // sound handle: bind by name (thiscall: bank, name, warn; ret 0xC)
+    const DWORD sndMaterialsBank = 0x968914; // -> the "materials" sound bank
     const DWORD fnCollSparks   = 0x441BF0;   // collision sparks (thiscall: contact, mover, impact; ret 0xC)
     const DWORD callCollSparks1 = 0x442714;  // call 0x441BF0
     const DWORD callCollSparks2 = 0x442CC2;  // call 0x441BF0
@@ -172,7 +225,7 @@ namespace hot {
     const DWORD callKinSetup   = 0x474AEA;   // call 0x4E69D0: collision boxes for a trigger's animated model
     const DWORD fnKinSetup     = 0x4E69D0;   //   (thiscall, box set; model, ?, detect-only flag)
     const DWORD callKinCreate  = 0x4E69B2;   // call 0x5F2260: make a box's PhysX actor (thiscall, box; no arguments)
-    const DWORD fnKinCreate    = 0x5F2260;   //   (uses the box's full size as the NxBox's half-size: twice too big)
+    const DWORD fnKinCreate    = 0x5F2260;   //   (NxBox dimensions = max - min of box +0x54: the part's half-size)
     const DWORD fnSetLinVel    = 0x5F9910;   // vehicle: set linear velocity (thiscall, const float[3])
     const DWORD fnSetAngVel    = 0x5F9970;   // vehicle: set angular velocity (thiscall, const float[3])
     struct Sig { DWORD addr; const char* bytes; int len; };
@@ -188,6 +241,7 @@ namespace hot {
         { callStepTail,   "\xE8\x53\x24\x01\x00", 5 },               // call 0x4210B0 (end of a step)
         { callRender3D,   "\xE8\xC3\x24\x01\x00", 5 },               // call 0x421160 (3D pass)
         { callFrameEnd,   "\xE8\x7B\xEF\x13\x00", 5 },               // call 0x54DC30
+        { boneFetch,      "\x8B\x4D\x08\x8B\x34\x81\xC1\xE6\x06\x03\xB3\xD0\x01\x00\x00", 15 },   // mov ecx,[ebp+8] / mov esi,[ecx+eax*4] / shl esi,6 / add esi,[ebx+0x1D0]
         { soundFind,      "\x53\x55\x56\x57\x8B\x7C\x24\x14", 8 }, // push ebx/ebp/esi/edi; mov edi,[esp+0x14]
         { debugPrint,     "\xC3\xCC\xCC\xCC\xCC", 5 },               // ret + padding
         { forceOneStep,   "\x75\x0E", 2 },                           // jne 0x5A23F9
@@ -240,6 +294,47 @@ namespace hot {
         { callBrainTargets, "\xE8\x9D\x7C\xFD\xFF", 5 },             // call 0x648B50
         { 0x456FEA,       "\xD8\x0D\x20\xEA\x92\x00", 6 },           // fmul dword ptr [0x92EA20]
         { sparkStreakLen, "\xD9\x05\xAC\xE1\x89\x00", 6 },           // fld dword ptr [0x89E1AC]
+        { callGameStep,   "\xE8\x98\xC7\x18\x00", 5 },              // call 0x59B3F0
+        { call2D1,        "\xE8\x5E\x24\x01\x00", 5 },              // call 0x421100
+        { call2D2,        "\xE8\xA9\x24\x01\x00", 5 },              // call 0x421150
+        { callFlush,      "\xE8\x52\xED\x13\x00", 5 },              // call 0x54DA00
+        { shadowTexMake,  "\x8B\x87\xB8\x00\x00\x00\x6A\x00", 8 },   // mov eax,[edi+0xB8] / push 0
+        { 0x57D7CB,       "\x6A\x72\x6A\x01\x6A\x01\x6A\x08", 8 },   // push 0x72 / push 1 / push 1 / push 8
+        { shadowDepthMake, "\x8B\xBF\xB8\x00\x00\x00\x8B\x07", 8 },   // mov edi,[edi+0xB8] / mov eax,[edi]
+        { 0x57D80C,       "\x6A\x4D\x6A\x08\x6A\x08\x57\xFF\xD1", 9 },   // push 0x4D / push 8 / push 8 / push edi / call ecx
+        { shadowViewport, "\xBF\x08\x00\x00\x00", 5 },             // mov edi,8
+        { shadowSizeParam, "\xD9\x05\xCC\x57\x8A\x00", 6 },        // fld dword ptr [0x8A57CC]
+        { shadowDepthK,   "\x00\x00\x80\x42", 4 },                   // 64.0f
+        { shadowFadeK,    "\x00\x00\x80\x41", 4 },                   // 16.0f
+        { shadowWideK,    "\x00\x00\x00\x43", 4 },                   // 128.0f
+        { alphaSort,      "\x83\xF8\x04\x8B\x4E\x10\x8D\xBC\x8B\x28\x36\xD5\x00", 13 },   // cmp eax,4 / mov ecx,[esi+0x10] / lea edi,[ebx+ecx*4+0xD53628]
+        { alphaSortEnd,   "\x8B\x0E\x8B\x46\x04\x83\xF8\x04\x8D\xBC\x8B\x28\x41\xEC\x00", 15 },   // mov ecx,[esi] / mov eax,[esi+4] / cmp eax,4 / lea edi,[ebx+ecx*4+0xEC4128]
+        { meshSort2,      "\x8B\x4E\x08\x8B\x46\x0C\x83\xF8\x04\x8D\xBC\x8B\xA8\x79\xED\x00", 16 },   // mov ecx,[esi+8] / mov eax,[esi+0xC] / cmp eax,4 / lea edi,[ebx+ecx*4+0xED79A8]
+        { meshSortEnd,    "\x83\x7C\x24\x28\x03", 5 },               // cmp dword ptr [esp+0x28],3
+        { callBlendMode,  "\xE8\xE7\xAE\xFF\xFF", 5 },               // call 0x5420F0
+        { fnBlendMode,    "\x8B\x54\x24\x04\x83\xFA\x07", 7 },     // mov edx,[esp+4] / cmp edx,7
+        { fnZWrite,       "\x8B\x81\xB4\x00\x00\x00\x80\xB8\xEC\x08\x01\x00\x00", 13 },   // mov eax,[ecx+0xB4] / cmp byte ptr [eax+0x108EC],0
+        { skyFarLd,       "\xD9\x05\x44\xA4\x8A\x00", 6 },           // fld dword ptr [0x8AA444]
+        { skySetWorld1,   "\x8B\x90\x24\x02\x00\x00", 6 },           // mov edx,[eax+0x224]
+        { skySetWorld2,   "\x8B\x90\x24\x02\x00\x00", 6 },
+        { 0x53E905,       "\x8B\xCD\xFF\xD2", 4 },                   // mov ecx,ebp / call edx
+        { 0x53EAE9,       "\x8B\xCD\xFF\xD2", 4 },
+        { shadowBackOffLd, "\xD9\x05\xF0\x98\x96\x00", 6 },        // fld dword ptr [0x9698F0]
+        { shadowFarLd,    "\xD9\x05\x10\x99\x96\x00", 6 },          // fld dword ptr [0x969910]
+        { shadowFadeLd,   "\xD9\x05\x24\x99\x96\x00", 6 },          // fld dword ptr [0x969924]
+        { 0x53C27F,       "\xD9\x81\xC0\x00\x00\x00\xD8\xC9\xD8\x60\x04\xDE\xE1", 13 },   // fld [ecx+0xC0] / fmul st,st1 / fsub [eax+4] / fsubrp
+        { 0x55A0DF,       "\xD9\x81\xC0\x00\x00\x00\xD8\xC9\xD8\x60\x04\xDE\xE1", 13 },
+        { 0x53C33E,       "\xD9\x81\xC0\x00\x00\x00\xD8\xC9\xD8\x60\x04\xDE\xE1", 13 },
+        { callTrackName,  "\xE8\xFF\xD0\x11\x00", 5 },            // call 0x59D840
+        { vtScrollDlgUpd, "\x60\x11\x68\x00", 4 },                // -> 0x681160
+        { callIntroPlay,  "\xE8\x9B\xF4\x0B\x00", 5 },            // call 0x538C20
+        { movIntroGo,     "\xC6\x05\x80\x9F\x95\x00\x00", 7 },    // mov byte ptr [0x959F80],0
+        { callPauseResume1, "\xE8\x49\xA5\x0B\x00", 5 },          // call 0x538C20
+        { callPauseResume2, "\xE8\x2B\x9D\x0B\x00", 5 },          // call 0x538C20
+        { callContactCopy1, "\xE8\xCA\x8E\xF6\xFF", 5 },            // call 0x5C41C0
+        { callContactCopy2, "\xE8\xBA\x8C\xF6\xFF", 5 },
+        { fnSndCopy,      "\x56\x8B\xF1\x8B\x06\x57\x8B\x7C\x24\x0C", 10 },   // push esi / mov esi,ecx / mov eax,[esi] / push edi / mov edi,[esp+0xC]
+        { fnSndBind,      "\x53\x55\x56\x57\x8B\x7C\x24\x14\x33\xF6", 10 },   // push ebx/ebp/esi/edi / mov edi,[esp+0x14] / xor esi,esi
         { callCollSparks1, "\xE8\xD7\xF4\xFF\xFF", 5 },             // call 0x441BF0
         { callCollSparks2, "\xE8\x29\xEF\xFF\xFF", 5 },             // call 0x441BF0
         { fnContactVec,   "\x8B\x54\x24\x08\x83\xEC\x0C\x85\xD2", 9 },   // mov edx,[esp+8] / sub esp,0xC / test edx,edx
@@ -247,12 +342,12 @@ namespace hot {
         { sparkSpawnEnd,  "\xD9\x83\xD8\x66\xCB\x01\xD9\x59\x38", 9 },   // fld dword ptr [ebx+0x1CB66D8] / fstp dword ptr [ecx+0x38]
         { fnSparkSys,     "\xE9\xF7\xC1\x00\x00", 5 },              // jmp 0x40D620
         { blurFlagLevel,  "\x75\x18\x8B\x4B\x08", 5 },               // jne 0x572896 / mov ecx,[ebx+8]
+        { 0x5727E8,       "\x56\x68\x4C\x4E\x8B\x00\xE8\xFD\x68\x01\x00", 11 },   // push esi / push "+%s: %f" / call 0x5890F0
         { blurAmount,     "\x8B\x8B\x34\x02\x00\x00\xD9\x44\x24\x10", 10 },   // mov ecx,[ebx+0x234] / fld dword ptr [esp+0x10]
         { rampageTopSpd,  "\x66\x66\xE6\x3E", 4 },                   // dd 0.45f
         { fnBrainTargets, "\x83\xEC\x14\x53\x55\x8B\xE9\x56", 8 },   // sub esp,0x14 / push ebx/ebp / mov ebp,ecx / push esi
         { 0x4E668E,       "\xE8\xDD\xB9\x10\x00", 5 },               // call 0x5F2070 (x2)
         { 0x4E68FB,       "\xE8\x70\xB7\x10\x00", 5 },
-        { fnKinPose,      "\x8B\x41\x6C\x8B\x88\x74\x01\x00\x00", 9 },   // mov eax,[ecx+0x6C] / mov ecx,[eax+0x174]
         { fnCarDustBall,  "\x53\x57\x8B\xF9\x8B\x87\xA4\x0D\x00\x00", 10 },   // push ebx / push edi / mov edi,ecx / mov eax,[edi+0xDA4]
         { fnCarReset,     "\x64\xA1\x00\x00\x00\x00\x6A\xFF", 8 },   // mov eax,fs:[0] / push -1
         { fnKinStep,      "\x83\xEC\x68\xD9\x05\x14\x0B\x96\x00", 9 },   // sub esp,0x68 / fld [0x960B14]
@@ -277,18 +372,23 @@ struct Config {
     char saveFolder[MAX_PATH] = "save";  // relative to the game root (above Bin), or a full path; empty = Documents
     int  portableRegistry = 1;
     int  interpolate = 1;                // 1 = above 60 fps with in-between frames
+    int  interpolateBones = 1;           // with interpolate=1: animated (skinned) models too - the ghoul and co.
     int  fpsLimit = 0;                   // 0 = refresh rate
     int  closeExits = 1;                 // closing the window quits like Alt+F4
     int  raceMusic = 1;                  // each race plays its own song (the PC port always played song 0)
     int  logToFile = 1;
-    int  gameLog = 0;                    // diagnostics: the game's own debug messages to HWBTMod_game.log
-    int  tuningLog = 1;                  // every number the game's scripts load, to HWBTMod_tuning.log
+    int  gameLog = 0;                    // diagnostics: the game's own debug messages to BTOverdrive_game.log
+    int  tuningLog = 1;                  // every number the game's scripts load, to BTOverdrive_tuning.log
     float speedFov = 12.0f;              // degrees added to the camera's field of view at speed (0 = off)
     float speedFovMin = 11.0f;           // speed (units/s) where it starts (11 ~ 25 mph)
     float speedFovMax = 45.0f;           // speed where it's full (45 ~ 100 mph)
     float speedBlur = 0.35f;             // motion blur at speed: strength at full (0 = off; the game's boost blur tops out at 0.7)
     float speedBlurMin = 30.0f;          //   speed where it starts
     float speedBlurMax = 70.0f;          //   speed where it's full
+    float hdrGlare = 0.5f;               // HDR "star" glare streaks, x the game's strength and brightness cap
+    float hdrBrightness = 1.0f;          // HDR: the tone-mapped image's brightness x this (g_OverBrightScale; 1 = the level's)
+    float hdrBloom = 1.0f;               //   bloom strength x this (g_BloomScale)
+    float hdrBloomThreshold = 1.0f;      //   bloom threshold x this (g_brightPassThreshold: higher = less blooms)
     float speedShake = 0.4f;             // camera shake at speed: degrees at full (0 = off)
     float speedShakeMin = 40.0f;         //   speed where it starts
     float speedShakeMax = 70.0f;         //   speed where it's full
@@ -302,16 +402,30 @@ struct Config {
     int   hazardSmoke = 1;               // a burst of smoke on a car the hazard throws
     float hazardFallReset = 25.0f;       // a thrown car this far below where it was hit is put back on the track (0 = never)
     float hazardPushTime = 0.5f;         // the throw keeps pushing for this long (seconds)
-    int   hazardGateFix = 1;             // the graveyard gate's panels get their collision where they are
+    int   hazardGateFix = 1;             // the graveyard gate's panels' collision made 3 units thick
     int   aiLeadSlowdown = 0;            // AI cars ahead of the player are slowed down (the game's rubber-banding)
     float aiWeaponCooldown = 2.5f;       // seconds between any two AI shots (game: 5)
     float aiTargetPlayer = 60.0f;        // % of AI shots aimed at the player, +10 per difficulty (game: 40)
     float aiStartBoost = 50.0f;          // % chance each AI car gets the start boost at GO (game: never)
     int   aiAreaWeaponLimit = 4;         // area weapons the AI holds back while this many are out (game: 2)
-    float boostMeterSpeed = 1.6f;        // the start-boost dial runs this many times as fast (1 = original)
+    float boostMeterSpeed = 2.4f;        // the start-boost dial runs this many times as fast (1 = original)
     int   rampageSpread = 1;             // Rampage: AI cars start spread over the whole track
     int   rampageFlee = 1;               // Rampage: AI cars run from the player
     float rampageSpeed = 1.0f;           //   their target speeds x this all the time
+    int   shadowMapSize = 2048;          // sun shadow map size (game: 8 x 8; 0 = the game's)
+    float shadowRange = 1000.0f;         //   how far ahead of the camera sun shadows reach (game: 64)
+    float shadowFade = 150.0f;           //   fading out over the last this much (game: 16)
+    float skyFar = 20000.0f;             // the sky's far plane (game: 5000)
+    float skyStretch = 1.0f;             // the sky stretched upward this many times (1 = as is)
+    int   glassSort = 1;                 // see-through draws sorted back to front
+    int   glassNoZWrite = 1;             // blended draws don't write depth
+    int   shadowFit = 1;                 //   the shadow light sees the whole height of the scene
+    float shadowBackOff = 1000.0f;       //   ...backing off this far toward the sun (game: 16)
+    float shadowFar = 2000.0f;           //   ...and seeing this deep (game: 64)
+    int   perfLog = 0;                   // frame timing in the log every 10 s
+    int   menuFixes = 1;                 // menus: the stray line at the top, the track name changing before its card
+    int   musicAtGo = 1;                 // race music starts at GO, after the countdown (as on the PS2)
+    int   scrapeSound = 1;               // the game's metalscrape sound while grinding walls and cars
     int   sparkStreaks = 1;              // dotted sparks (car hits) drawn as streaks
     float sparkLength = 0.5f;            //   a streak's length: seconds of the spark's travel (game: 0.25)
     float sparkWidth = 4.0f;             //   the switched sparks' width x this
@@ -321,6 +435,9 @@ struct Config {
     int   sparkCount = 3;                //   extra sparks thrown with each one the game throws
     float sparkSpread = 0.5f;            //   how far apart they scatter (x the spark's speed)
     float sparkUp = 1.0f;                //   how hard they're thrown upward (x the spark's speed)
+    float sparkImpactRef = 3800.0f;      //   a hit this strong throws normal-size sparks (in proportion; 0 = all the same)
+    float sparkImpactMax = 1.6f;         //   ...and the hardest hits' sparks at most this x normal
+    float sparkTwist = 25.0f;            //   each spark turned up to this many degrees off its course
     float sparkHot = 1.0f;               //   how far sparks can burn toward white-hot (0 = game colours)
     float rampageTopSpeed = 1.0f;        // Rampage AI cars' top speed, x the player's (game: 0.45)
     float rampageFleeRange = 60.0f;      //   within this distance (units)
@@ -361,7 +478,7 @@ static void InitDirs() {
 }
 
 static const char kIniText[] =
-    "; HWBTMod.ini (v" HWBT_VERSION ") - Hot Wheels: Beat That!\n"
+    "; " MOD_FILE ".ini (" MOD_NAME " v" HWBT_VERSION ") - Hot Wheels: Beat That!\n"
     "; --- display (replaces DisplayConfig.exe) ---\n"
     "; resolution; 0 = desktop resolution\n"
     "width=0\n"
@@ -382,6 +499,9 @@ static const char kIniText[] =
     "; the game runs its simulation at 60 Hz; interpolate=1 draws in-between frames, so it runs\n"
     ";   smoothly above 60 fps. 0 = original (locked to 60 fps)\n"
     "interpolate=1\n"
+    "; with interpolate=1, smooth animated models too (the graveyard's ghoul, characters...) (0 = only\n"
+    ";   whole objects: they animate at 60 Hz)\n"
+    "interpolateBones=1\n"
     "; frame cap with interpolate=1: 0 = monitor refresh rate, or a number (30-1000)\n"
     "fpsLimit=0\n"
     "; closing the window (title bar, window manager, taskbar) quits the game the way Alt+F4 does\n"
@@ -391,11 +511,11 @@ static const char kIniText[] =
     "raceMusic=1\n"
     "logToFile=1\n"
     "; diagnostics: the game's own debug messages (errors, missing files, unfinished PC code) and\n"
-    ";   failed sound lookups to HWBTMod_game.log, and frame-rate statistics to this log\n"
+    ";   failed sound lookups to BTOverdrive_game.log, and frame-rate statistics to this log\n"
     "gameLog=0\n"
     "; --- tuning ---\n"
-    "; list every number the game's scripts load (physics, cameras, effects...) in HWBTMod_tuning.log;\n"
-    ";   changes go in HWBTMod_tuning.txt (see the top of the log)\n"
+    "; list every number the game's scripts load (physics, cameras, effects...) in BTOverdrive_tuning.log;\n"
+    ";   changes go in BTOverdrive_tuning.txt (see the top of the log)\n"
     "tuningLog=1\n"
     "; --- camera ---\n"
     "; widen the race camera's field of view with speed: degrees added at full speed (0 = off),\n"
@@ -409,6 +529,17 @@ static const char kIniText[] =
     "speedBlur=0.35\n"
     "speedBlurMin=30\n"
     "speedBlurMax=70\n"
+    "; HDR glare: the star streaks the race tracks put on bright paint and floors, at up to 3.5x\n"
+    ";   - what made highlights look so aggressive (x the game's: 1 = as it was, 0.5 = half, 0 = off)\n"
+    "hdrGlare=0.5\n"
+    "; HDR, as a share of each level region's own settings (1 = as the game has it): the image's\n"
+    ";   brightness (g_OverBrightScale - 1.5 on the car select), bloom strength, and the bloom\n"
+    ";   threshold (higher = only brighter things glow); the log lists each region's values\n"
+    "hdrBrightness=1\n"
+    "hdrBloom=1\n"
+    "hdrBloomThreshold=1\n"
+    "; any HDR setting by name, as an absolute value, e.g. hdr.g_Star=0 (glare streaks off), hdr.g_StarScale=0.3,\n"
+    ";   hdr.g_brightPassThreshold=0.9, hdr.g_Exposure=0.6 (the log lists them all per region)\n"
     "; shake the race camera at high speed: how far it turns (degrees) at full shake (0 = off),\n"
     ";   building up from speedShakeMin to speedShakeMax (units per second)\n"
     "speedShake=0.4\n"
@@ -419,8 +550,8 @@ static const char kIniText[] =
     ";   within hazardReach times a moving part's size, while the part moves faster than\n"
     ";   hazardMinSpeed, is thrown hazardPush units/s sideways (away from the part) and hazardLift\n"
     ";   upward, with a tumble of hazardSpin (radians/s); for scale, cars race at about 30-45 units/s.\n"
-    ";   Also fixes the hazards' collision boxes, which were twice their parts' size (invisible\n"
-    ";   walls). 0 = original\n"
+    ";   Also shrinks the slabs' and hands' collision boxes to half, as they reach well beyond what's\n"
+    ";   drawn (invisible walls). 0 = original\n"
     "hazardHits=1\n"
     "hazardMinSpeed=50\n"
     "hazardReach=3\n"
@@ -437,7 +568,8 @@ static const char kIniText[] =
     "hazardSmoke=1\n"
     "; the throw keeps pushing for this many seconds (the car's grip takes sideways speed out fast)\n"
     "hazardPushTime=0.5\n"
-    "; give the graveyard gate's panels their collision where they are (1) or as the game has it (0)\n"
+    "; the graveyard gate's panels: 1 = their collision made 3 units thick, so cars can't slip through\n"
+    ";   as they swing shut; 0 = as the game has them\n"
     "hazardGateFix=1\n"
     "; --- starting grid ---\n"
     "; races start in a grid, as in the trailer (1), or in single file (0); gridColumns: cars side by\n"
@@ -450,7 +582,7 @@ static const char kIniText[] =
     "gridStagger=3.5\n"
     "; the start-boost dial (hit the green during 3-2-1) runs this many times as fast: higher = harder\n"
     ";   (1 = original; the countdown itself keeps its timing)\n"
-    "boostMeterSpeed=1.6\n"
+    "boostMeterSpeed=2.4\n"
     "; --- AI opponents (game values in brackets) ---\n"
     "; slow down AI cars that get ahead of you, the game's rubber-banding (1), or let them race (0)\n"
     "aiLeadSlowdown=0\n"
@@ -462,6 +594,39 @@ static const char kIniText[] =
     "aiAreaWeaponLimit=4\n"
     "; % chance each AI car gets the start boost at GO, as if it hit the green [never]\n"
     "aiStartBoost=50\n"
+    "; --- rendering ---\n"
+    "; sun shadow map size: the PC game renders track and scenery shadows into an 8x8 map, a blurry\n"
+    ";   dark patch round your car (0 = the game's); shadowRange: how far ahead they reach [64],\n"
+    ";   fading out over the last shadowFade [16]\n"
+    "shadowMapSize=2048\n"
+    "shadowRange=1000\n"
+    "shadowFade=150\n"
+    "; the sun's shadow light sees the whole height of the scene, so roofs and wall tops cast shadows\n"
+    ";   too (the game's was only 16 units deep toward the sun): back-off and depth (shadowFit=0: the game's)\n"
+    "shadowFit=1\n"
+    "shadowBackOff=1000\n"
+    "shadowFar=2000\n"
+    "; the sky: its far plane (game: 5000) and how many times it's stretched upward (1 = as is) - for the\n"
+    ";   black hole at the top of the sky the wider view shows\n"
+    "skyFar=20000\n"
+    "skyStretch=1\n"
+    "; see-through things (glass, glass road pieces): drawn back to front, and they don't hide what's\n"
+    ";   drawn behind them afterward (they flickered between clear and washed out) (0 = the game's)\n"
+    "glassSort=1\n"
+    "glassNoZWrite=1\n"
+    "; frame timing in BTOverdrive.log every 10 s (where the time goes: waiting, game, 3D, draw+present)\n"
+    "perfLog=0\n"
+    "; --- menus ---\n"
+    "; the 1-pixel line at the top of the menus, and the track select showing the next track's name\n"
+    ";   on the old card for a frame (0 = as the game has them)\n"
+    "menuFixes=1\n"
+    "; --- race music ---\n"
+    "; the race music starts at GO, after the countdown and start boost, as on the PS2 (0 = during the countdown)\n"
+    "musicAtGo=1\n"
+    "; --- scrape sound ---\n"
+    "; grinding along walls and other cars plays the game's own metalscrape sound (its surfaces never\n"
+    ";   name one, so it was silent) (0 = off)\n"
+    "scrapeSound=1\n"
     "; --- sparks ---\n"
     "; draw the dotted sparks (car-on-car hits) as streaks like the other sparks (0 = original);\n"
     ";   sparkLength: how long every streak is, in seconds of the spark's flight [0.25];\n"
@@ -473,6 +638,13 @@ static const char kIniText[] =
     ";   and sparkHot: how far some burn toward white-hot (0 = the game's colours, 1 = a few near white)\n"
     "sparkVary=0.6\n"
     "sparkHot=1\n"
+    "; harder hits throw bigger, longer, faster and more sparks: a hit of sparkImpactRef strength is\n"
+    ";   normal size (the log shows your hits' range; 0 = all the same); sparkTwist: each spark is\n"
+    ";   turned up to this many degrees off its course, so they don't all line up\n"
+    "sparkImpactRef=3800\n"
+    "; the hardest hits' sparks at most this x normal size (and count)\n"
+    "sparkImpactMax=1.6\n"
+    "sparkTwist=25\n"
     "; collision sparks only from walls and cars, not the road under you (landing jumps, ramps):\n"
     ";   a hit more than this much along your car's up is the road (1 = sparks from everything)\n"
     "sparkFloor=0.6\n"
@@ -501,8 +673,17 @@ static const char kIniText[] =
     "rampageFleeSpeed=1.4\n"
     "rampageDodge=0.3\n";
 
+// Settings files from before the rename (HWBTMod) are carried over: if the new
+// one isn't there yet, the old one is copied to the new name and used.
+static void CarryOver(const char* newName, const char* oldName) {
+    char np[MAX_PATH], op[MAX_PATH];
+    snprintf(np, sizeof(np), "%s%s", g_asiDir, newName); snprintf(op, sizeof(op), "%s%s", g_asiDir, oldName);
+    if (GetFileAttributesA(np) == INVALID_FILE_ATTRIBUTES && GetFileAttributesA(op) != INVALID_FILE_ATTRIBUTES)
+        CopyFileA(op, np, TRUE);
+}
 static void LoadConfig() {
-    char path[MAX_PATH]; snprintf(path, sizeof(path), "%sHWBTMod.ini", g_asiDir);
+    CarryOver(MOD_FILE ".ini", "HWBTMod.ini");
+    char path[MAX_PATH]; snprintf(path, sizeof(path), "%s" MOD_FILE ".ini", g_asiDir);
     FILE* f = fopen(path, "r");
     if (!f) {
         if ((f = fopen(path, "w"))) { fputs(kIniText, f); fclose(f); }
@@ -521,6 +702,11 @@ static void LoadConfig() {
         char* ve = val + strlen(val);
         while (ve > val && (ve[-1] == '\r' || ve[-1] == '\n' || ve[-1] == ' ' || ve[-1] == '\t')) *--ve = 0;
         int n = atoi(val);
+        if (!_strnicmp(key, "hdr.", 4) && key[4] && strlen(key + 4) < 40) {   // hdr.<effect parameter>=value (absolute)
+            extern void HdrOverride(const char* name, float v);
+            HdrOverride(key + 4, (float)atof(val));
+            continue;
+        }
         if      (!_stricmp(key, "width"))              g_cfg.width = n;
         else if (!_stricmp(key, "height"))             g_cfg.height = n;
         else if (!_stricmp(key, "modelDetail"))        g_cfg.modelDetail = n;
@@ -531,6 +717,7 @@ static void LoadConfig() {
         else if (!_stricmp(key, "saveFolder"))         lstrcpynA(g_cfg.saveFolder, val, MAX_PATH);
         else if (!_stricmp(key, "portableRegistry"))   g_cfg.portableRegistry = n;
         else if (!_stricmp(key, "interpolate"))        g_cfg.interpolate = n;
+        else if (!_stricmp(key, "interpolateBones"))   g_cfg.interpolateBones = n;
         else if (!_stricmp(key, "fpsLimit"))           g_cfg.fpsLimit = n;
         else if (!_stricmp(key, "closeExits"))         g_cfg.closeExits = n;
         else if (!_stricmp(key, "raceMusic"))          g_cfg.raceMusic = n;
@@ -543,6 +730,10 @@ static void LoadConfig() {
         else if (!_stricmp(key, "speedBlur"))          g_cfg.speedBlur = (float)atof(val);
         else if (!_stricmp(key, "speedBlurMin"))       g_cfg.speedBlurMin = (float)atof(val);
         else if (!_stricmp(key, "speedBlurMax"))       g_cfg.speedBlurMax = (float)atof(val);
+        else if (!_stricmp(key, "hdrGlare"))           g_cfg.hdrGlare = (float)atof(val);
+        else if (!_stricmp(key, "hdrBrightness"))      g_cfg.hdrBrightness = (float)atof(val);
+        else if (!_stricmp(key, "hdrBloom"))           g_cfg.hdrBloom = (float)atof(val);
+        else if (!_stricmp(key, "hdrBloomThreshold"))  g_cfg.hdrBloomThreshold = (float)atof(val);
         else if (!_stricmp(key, "speedShake"))         g_cfg.speedShake = (float)atof(val);
         else if (!_stricmp(key, "speedShakeMin"))      g_cfg.speedShakeMin = (float)atof(val);
         else if (!_stricmp(key, "speedShakeMax"))      g_cfg.speedShakeMax = (float)atof(val);
@@ -563,6 +754,20 @@ static void LoadConfig() {
         else if (!_stricmp(key, "boostMeterSpeed"))    g_cfg.boostMeterSpeed = (float)atof(val);
         else if (!_stricmp(key, "rampageSpread"))      g_cfg.rampageSpread = n;
         else if (!_stricmp(key, "rampageFlee"))        g_cfg.rampageFlee = n;
+        else if (!_stricmp(key, "shadowMapSize"))      g_cfg.shadowMapSize = n;
+        else if (!_stricmp(key, "shadowRange"))        g_cfg.shadowRange = (float)atof(val);
+        else if (!_stricmp(key, "shadowFade"))         g_cfg.shadowFade = (float)atof(val);
+        else if (!_stricmp(key, "skyFar"))             g_cfg.skyFar = (float)atof(val);
+        else if (!_stricmp(key, "skyStretch"))         g_cfg.skyStretch = (float)atof(val);
+        else if (!_stricmp(key, "glassSort"))          g_cfg.glassSort = n;
+        else if (!_stricmp(key, "glassNoZWrite"))      g_cfg.glassNoZWrite = n;
+        else if (!_stricmp(key, "shadowFit"))          g_cfg.shadowFit = n;
+        else if (!_stricmp(key, "shadowBackOff"))      g_cfg.shadowBackOff = (float)atof(val);
+        else if (!_stricmp(key, "shadowFar"))          g_cfg.shadowFar = (float)atof(val);
+        else if (!_stricmp(key, "perfLog"))            g_cfg.perfLog = n;
+        else if (!_stricmp(key, "menuFixes"))          g_cfg.menuFixes = n;
+        else if (!_stricmp(key, "musicAtGo"))          g_cfg.musicAtGo = n;
+        else if (!_stricmp(key, "scrapeSound"))        g_cfg.scrapeSound = n;
         else if (!_stricmp(key, "sparkStreaks"))       g_cfg.sparkStreaks = n;
         else if (!_stricmp(key, "sparkLength"))        g_cfg.sparkLength = (float)atof(val);
         else if (!_stricmp(key, "sparkWidth"))         g_cfg.sparkWidth = (float)atof(val);
@@ -572,6 +777,9 @@ static void LoadConfig() {
         else if (!_stricmp(key, "sparkCount"))         g_cfg.sparkCount = n;
         else if (!_stricmp(key, "sparkSpread"))        g_cfg.sparkSpread = (float)atof(val);
         else if (!_stricmp(key, "sparkUp"))            g_cfg.sparkUp = (float)atof(val);
+        else if (!_stricmp(key, "sparkImpactRef"))     g_cfg.sparkImpactRef = (float)atof(val);
+        else if (!_stricmp(key, "sparkImpactMax"))     g_cfg.sparkImpactMax = (float)atof(val);
+        else if (!_stricmp(key, "sparkTwist"))         g_cfg.sparkTwist = (float)atof(val);
         else if (!_stricmp(key, "sparkHot"))           g_cfg.sparkHot = (float)atof(val);
         else if (!_stricmp(key, "rampageTopSpeed"))    g_cfg.rampageTopSpeed = (float)atof(val);
         else if (!_stricmp(key, "rampageSpeed"))       g_cfg.rampageSpeed = (float)atof(val);
@@ -904,6 +1112,7 @@ extern "C" {
     DWORD g_camApplyCont = hot::camApply + 6;
     DWORD g_setWorldCont = hot::setWorld + 7;
     DWORD g_vehDrawCont = hot::vehDraw + 6;
+    DWORD g_boneFetchCont = hot::boneFetch + 15;
 }
 
 static Track* FindTrack(BYTE* obj, int kind) {
@@ -1086,8 +1295,22 @@ extern "C" const float* __cdecl RegMat(float* p, int src, DWORD caller) {
     t->src |= (BYTE)src;
     return src == 1 && !t->written ? FilterWorld(t, p) : p;     // (written: already blended in memory)
 }
-extern "C" void SetWorldStub(); extern "C" void GetXformStub();
+extern "C" void SetWorldStub(); extern "C" void GetXformStub(); extern "C" void BoneFetchStub();
 asm(".text\n"
+    ".globl _BoneFetchStub\n_BoneFetchStub:\n"   // replaces the bone fetch at 0x54AF55 (skinned models: the ghoul...)
+    "    movl 8(%ebp), %ecx\n"
+    "    movl (%ecx,%eax,4), %esi\n"
+    "    shll $6, %esi\n"
+    "    addl 0x1D0(%ebx), %esi\n"             // esi = the bone's matrix (in the model's bone array)
+    "    pushal\n"
+    "    pushl $0x54AF55\n"                    // (caller tag, for the log)
+    "    pushl $1\n"
+    "    pushl %esi\n"
+    "    call _RegMat\n"                       // blended like a SetWorld matrix (FilterWorld)
+    "    addl $12, %esp\n"
+    "    movl %eax, 4(%esp)\n"                 // esi after popal
+    "    popal\n"
+    "    jmp *_g_boneFetchCont\n"
     ".globl _SetWorldStub\n_SetWorldStub:\n"   // replaces sub esp,0x40 / mov eax,[esp+0x44] at 0x53C860
     "    pushal\n"
     "    pushl 32(%esp)\n"                     // the caller (return address, above pushal)
@@ -1229,6 +1452,62 @@ static void LogStats() {
 }
 
 // The 3D pass: blend in (put back in HkFrameEnd), then draw.
+// Frame timing (perfLog=1): where a frame's time goes, logged every 10 s. The
+// main loop (0x40EC1A on): the frame cap (waiting), the 60 Hz steps (0x59B3F0
+// each: the game's simulation, AI, physics), the 3D pass (0x421160: walks the
+// scene and queues the draws), the 2D pass (0x421100, 0x421150: HUD), the
+// renderer's flush (0x54DA00: every Direct3D draw call, shadows, the
+// post-processing - CPU time spent feeding the driver, plus waits for the GPU)
+// and the frame end (0x54DC30: Present). What's left over is "other".
+enum { PF_FRAME, PF_WAIT, PF_SIM, PF_3D, PF_2D, PF_DRAW, PF_PRESENT, PF_OTHER, PF_N };
+static LONGLONG g_pfQpf = 0, g_pfFrameStart = 0, g_pfCur[PF_N];
+static double g_pfSum[PF_N], g_pfMax[PF_N]; static LONG g_pfN = 0, g_pfSlow = 0, g_pfSteps = 0; static DWORD g_pfLogMs = 0;
+static LONGLONG Qpc() { LARGE_INTEGER t; QueryPerformanceCounter(&t); return t.QuadPart; }
+static void PerfFrameStart(LONGLONG waitTicks) {                // the limiter: one frame ends, the next starts
+    LONGLONG now = Qpc();
+    if (!g_pfQpf) { LARGE_INTEGER f; QueryPerformanceFrequency(&f); g_pfQpf = f.QuadPart; }
+    if (g_pfFrameStart) {
+        double k = 1000.0 / (double)g_pfQpf, v[PF_N];
+        g_pfCur[PF_FRAME] = now - waitTicks - g_pfFrameStart;   // (from this frame's wait start back to the last one's)
+        LONGLONG other = g_pfCur[PF_FRAME];
+        for (int i = PF_WAIT; i < PF_OTHER; i++) other -= g_pfCur[i];
+        g_pfCur[PF_OTHER] = other;
+        for (int i = 0; i < PF_N; i++) { v[i] = g_pfCur[i] * k; g_pfSum[i] += v[i]; if (v[i] > g_pfMax[i]) g_pfMax[i] = v[i]; }
+        g_pfN++;
+        if (v[PF_FRAME] - v[PF_WAIT] > 16.7) g_pfSlow++;        // (work alone over a 60 Hz frame)
+    }
+    g_pfFrameStart = now - waitTicks;
+    memset(g_pfCur, 0, sizeof(g_pfCur));
+    g_pfCur[PF_WAIT] = waitTicks;
+    DWORD ms = GetTickCount();
+    if (!g_pfLogMs) g_pfLogMs = ms;
+    if (ms - g_pfLogMs >= 10000 && g_pfN > 0) {
+        double n = (double)g_pfN;
+        static const char* nm[PF_N] = { "frame", "waiting", "game steps", "3D queue", "2D", "draw (flush)", "present", "other" };
+        char line[600]; int l = snprintf(line, sizeof(line), "perf: %.0f fps, %.2f steps/frame; avg/max ms:", 1000.0 / (g_pfSum[PF_FRAME] / n),
+                                         (double)g_pfSteps / n);
+        for (int i = PF_WAIT; i < PF_N && l < 560; i++)
+            l += snprintf(line + l, sizeof(line) - l, " %s %.1f/%.1f%s", nm[i], g_pfSum[i] / n, g_pfMax[i], i + 1 < PF_N ? "," : "");
+        Logf("%s; %ld of %ld frames over 16.7 ms of work\n", line, g_pfSlow, g_pfN);
+        memset(g_pfSum, 0, sizeof(g_pfSum)); memset(g_pfMax, 0, sizeof(g_pfMax)); g_pfN = g_pfSlow = g_pfSteps = 0; g_pfLogMs = ms;
+    }
+}
+static void __cdecl HkPfStep() {
+    LONGLONG t = Qpc(); reinterpret_cast<VoidFn_t>(hot::fnGameStep)(); g_pfCur[PF_SIM] += Qpc() - t; g_pfSteps++;
+}
+static void __cdecl HkPf2D1() { LONGLONG t = Qpc(); reinterpret_cast<VoidFn_t>(hot::fn2D1)(); g_pfCur[PF_2D] += Qpc() - t; }
+static void __cdecl HkPf2D2() { LONGLONG t = Qpc(); reinterpret_cast<VoidFn_t>(hot::fn2D2)(); g_pfCur[PF_2D] += Qpc() - t; }
+static void __attribute__((thiscall)) HkPfFlush(void* r) {
+    LONGLONG t = Qpc(); reinterpret_cast<Limiter_t>(hot::fnFlush)(r); g_pfCur[PF_DRAW] += Qpc() - t;
+}
+static void InstallPerf() {
+    if (!g_cfg.perfLog || !g_cfg.interpolate) return;           // (the frame start comes from the frame cap)
+    if (!PatchCall(hot::callGameStep, reinterpret_cast<void*>(&HkPfStep), 5) ||
+        !PatchCall(hot::call2D1, reinterpret_cast<void*>(&HkPf2D1), 5) ||
+        !PatchCall(hot::call2D2, reinterpret_cast<void*>(&HkPf2D2), 5) ||
+        !PatchCall(hot::callFlush, reinterpret_cast<void*>(&HkPfFlush), 5)) Logf("perf: patch FAILED\n");
+    else Logf("perf: frame timing in the log every 10 s\n");
+}
 static void __cdecl HkRender3D() {
     g_frameNo++; g_st.frames++;
     float a = 1.0f, dt = *reinterpret_cast<float*>(hot::stepDt);
@@ -1269,7 +1548,9 @@ static void __cdecl HkRender3D() {
         g_stackLo = g_stackHi > 0x100000 ? g_stackHi - 0x100000 : 0;  // HOT.exe reserves 1 MB of stack
     }
     g_inRender = true;
+    LONGLONG pf0 = g_cfg.perfLog ? Qpc() : 0;
     reinterpret_cast<VoidFn_t>(hot::fnRender3D)();
+    if (pf0) g_pfCur[PF_3D] += Qpc() - pf0;
 }
 
 // End of the frame's drawing (0x54DC30, after the 2D pass and the renderer's
@@ -1278,7 +1559,9 @@ static void __cdecl HkRender3D() {
 // then, not just through the 3D pass.
 static void CamShakeUndo();
 static void __attribute__((thiscall)) HkFrameEnd(void* renderer) {
+    LONGLONG pf0 = g_cfg.perfLog ? Qpc() : 0;
     reinterpret_cast<Limiter_t>(hot::fnFrameEnd)(renderer);
+    if (pf0) g_pfCur[PF_PRESENT] += Qpc() - pf0;
     CamShakeUndo();                                // (before the check below: a shaken camera isn't "moved by the pass")
     if (!g_inRender) return;                       // no blend this frame
     g_inRender = false;
@@ -1581,6 +1864,60 @@ asm(".text\n"
 static float g_blurSpeed = 0.0f; static DWORD g_blurSpeedMs = 0;
 static float g_blurMax = 0.0f; static LONG g_blurOn = 0; static bool g_blurLogged = false;
 typedef HRESULT (__stdcall *EffSetFloat_t)(void*, const char*, float);
+// HDR. Each region of a level has HDR settings ("HDR Region File Settings":
+// g_OverBrightScale, g_Bloom, g_BloomScale, g_brightPassThreshold,
+// g_brightnessClamp...) that the post-processing (0x5726C0) hands to its
+// effect as they are, printing each one through the game's debug output
+// (0x5727EE: "+%s: %f"). That print is hooked: the values are kept (and logged
+// once each), and every frame the ones with an INI scale other than 1 are set
+// again, scaled: hdrBrightness x g_OverBrightScale (the tone-mapped image's
+// brightness: 1.5 on the car select), hdrBloom x g_BloomScale, hdrBloomThreshold
+// x g_brightPassThreshold (only what's brighter than it blooms). Any setting
+// can also be given outright as hdr.<name>=value (applied after the scales, so
+// it wins). And hdrGlare x g_StarScale and g_brightnessClampStar: the "star"
+// glare streaks the race regions draw from anything above 30% brightness
+// (g_brightPassThresholdStar 0.3) at 0.5 strength, up to 3.5x - the overdone
+// highlights on paint and floors. At 0.5 they're half as strong, up to 1.75x.
+struct HdrParam { const char* name; float base; bool have; float* scale; };
+static HdrParam g_hdr[5] = {
+    { "g_OverBrightScale", 0, false, &g_cfg.hdrBrightness },
+    { "g_BloomScale", 0, false, &g_cfg.hdrBloom },
+    { "g_brightPassThreshold", 0, false, &g_cfg.hdrBloomThreshold },
+    { "g_StarScale", 0, false, &g_cfg.hdrGlare },               // the glare streaks' strength
+    { "g_brightnessClampStar", 0, false, &g_cfg.hdrGlare },     // and how bright they can get
+};
+struct HdrOv { char name[40]; float v; };
+static HdrOv g_hdrOv[32]; static int g_hdrOvN = 0;
+void HdrOverride(const char* name, float v) {
+    if (g_hdrOvN >= 32) return;
+    snprintf(g_hdrOv[g_hdrOvN].name, sizeof(g_hdrOv[0].name), "%s", name); g_hdrOv[g_hdrOvN++].v = v;
+}
+static bool HdrActive() { if (g_hdrOvN) return true; for (const HdrParam& h : g_hdr) if (*h.scale != 1.0f) return true; return false; }
+extern "C" void __cdecl HdrParamNote(const char* fmt, const char* name, double v) {
+    reinterpret_cast<void (__cdecl *)(const char*, const char*, double)>(hot::debugPrint)(fmt, name, v);   // (the game log, if on)
+    if (!name || IsBadStringPtrA(name, 64)) return;
+    static char seen[48][40]; static float seenV[48]; static int nSeen = 0;
+    bool fresh = true;
+    for (int i = 0; i < nSeen && fresh; i++) if (!strcmp(seen[i], name) && seenV[i] == (float)v) fresh = false;
+    if (fresh && nSeen < 48) {
+        snprintf(seen[nSeen], sizeof(seen[nSeen]), "%s", name); seenV[nSeen++] = (float)v;
+        Logf("hdr: region setting %s = %.3f\n", name, v);
+    }
+    for (HdrParam& h : g_hdr) if (!strcmp(h.name, name)) { h.base = (float)v; h.have = true; }
+}
+static void HdrApply(void* eff) {
+    if (!eff) return;
+    void** vt = *reinterpret_cast<void***>(eff);
+    for (const HdrParam& h : g_hdr)
+        if (h.have && *h.scale != 1.0f)
+            reinterpret_cast<EffSetFloat_t>(vt[0x78 / 4])(eff, h.name, h.base * *h.scale);
+    static bool logged = false;
+    for (int i = 0; i < g_hdrOvN; i++) {
+        HRESULT hr = reinterpret_cast<EffSetFloat_t>(vt[0x78 / 4])(eff, g_hdrOv[i].name, g_hdrOv[i].v);
+        if (!logged) Logf("hdr: %s set to %.3f%s\n", g_hdrOv[i].name, g_hdrOv[i].v, hr < 0 ? " - FAILED (no such parameter in the post-processing effect)" : "");
+    }
+    logged = true;
+}
 extern "C" void __cdecl SpeedBlur(float* amount, BYTE* pp) {
     float game = *amount, ours = 0.0f;
     if (GetTickCount() - g_blurSpeedMs < 500) {                 // (a race camera on the player's car just now)
@@ -1591,6 +1928,8 @@ extern "C" void __cdecl SpeedBlur(float* amount, BYTE* pp) {
     }
     BYTE* fx = pp ? *reinterpret_cast<BYTE**>(pp + 0x234) : nullptr;
     void* eff = fx ? *reinterpret_cast<void**>(fx + 0x1C) : nullptr;   // the ID3DXEffect
+    HdrApply(eff);
+    if (g_cfg.speedBlur <= 0.0f) return;
     if (eff) {
         void** vt = *reinterpret_cast<void***>(eff);
         reinterpret_cast<EffSetFloat_t>(vt[0x78 / 4])(eff, "g_MotionBlur", 1.0f);   // (no such parameter: does nothing)
@@ -1766,7 +2105,9 @@ static void PaceWait() {
 static void __attribute__((thiscall)) HkLimiter(void* lim) {
     float* minMs = reinterpret_cast<float*>(static_cast<BYTE*>(lim) + 4);
     float saved = *minMs;
+    LONGLONG pf0 = g_cfg.perfLog ? Qpc() : 0;
     PaceWait();
+    if (pf0) PerfFrameStart(Qpc() - pf0);
     *minMs = 0.0f;
     reinterpret_cast<Limiter_t>(hot::fnLimiter)(lim);
     *minMs = saved;                                             // the loading-screen loop keeps its own cap
@@ -1803,6 +2144,11 @@ static void InstallFrameRate() {
     ok = ok && PatchBytes(hot::setWorld, jmp7, 7);
     rel = reinterpret_cast<DWORD>(&GetXformStub) - (hot::getXform + 5); memcpy(jmp7 + 1, &rel, 4);
     ok = ok && PatchBytes(hot::getXform, jmp7, 5);
+    if (g_cfg.interpolateBones) {
+        BYTE jmp15[15] = { 0xE9 }; memset(jmp15 + 5, 0x90, 10);
+        rel = reinterpret_cast<DWORD>(&BoneFetchStub) - (hot::boneFetch + 5); memcpy(jmp15 + 1, &rel, 4);
+        ok = ok && PatchBytes(hot::boneFetch, jmp15, 15);
+    }
     ok = ok && PatchCall(hot::callVehLights, reinterpret_cast<void*>(&HkVehLights), 5);
     for (DWORD at : hot::callCarShadow) ok = ok && PatchCall(at, reinterpret_cast<void*>(&HkCarShadow), 5);
     ok = ok && PatchCall(hot::callCarTrails, reinterpret_cast<void*>(&HkCarTrails), 5);
@@ -1991,7 +2337,7 @@ static void InstallRaceMusic() {
 // The game's own debug output. HOT.exe has about 1,200 calls to a debug printf
 // (0x5890F0) - warnings, missing files, "not implemented on PC" - that the
 // release build turned into an empty function. It's restored here and written
-// to HWBTMod_game.log, each message (by format string) at most 5 times, with a
+// to BTOverdrive_game.log, each message (by format string) at most 5 times, with a
 // count of further repeats every minute. Arguments are formatted defensively:
 // a bad string pointer prints as (bad) instead of crashing.
 // ---------------------------------------------------------------------------
@@ -2143,10 +2489,10 @@ static char __attribute__((thiscall)) HkSoundFind(void* self, BYTE* bank, const 
 }
 static void InstallGameLog() {
     if (!g_cfg.gameLog) return;
-    char path[MAX_PATH]; snprintf(path, sizeof(path), "%sHWBTMod_game.log", g_asiDir);
+    char path[MAX_PATH]; snprintf(path, sizeof(path), "%s" MOD_FILE "_game.log", g_asiDir);
     if (!(g_glog = fopen(path, "w"))) { Logf("game log: can't create %s\n", path); return; }
     InitializeCriticalSection(&g_glogLock);
-    fprintf(g_glog, "HOT.exe debug messages (HWBTMod v" HWBT_VERSION "): time, caller, message\n");
+    fprintf(g_glog, "HOT.exe debug messages (" MOD_NAME " v" HWBT_VERSION "): time, caller, message\n");
     if (!PatchJmp(hot::debugPrint, reinterpret_cast<DWORD>(&GameDebugPrint))) Logf("game log: patch FAILED\n");
     if (!PatchJmp(hot::soundFind, reinterpret_cast<DWORD>(&HkSoundFind))) Logf("game log: sound audit patch FAILED\n");
 }
@@ -2156,10 +2502,12 @@ static void InstallGameLog() {
 // track...) are trigger events whose model gets collision boxes, one per part,
 // that follow the parts every step (set up by 0x4E67F0, moved by 0x4E6630).
 // Two game bugs:
-//  - Each box's PhysX shape is made from the part's full size, but an NxBox
-//    takes half-sizes: every box was twice as big as its part in every direction
-//    (invisible walls around the slabs). The size is halved while the actor is
-//    made (0x5F2260).
+//  - The boxes of the slabs and hands reach well beyond what's drawn (invisible
+//    walls around the slabs): they're made half the size while the actor is made
+//    (0x5F2260). (Not because the game doubles them, as first thought: each box
+//    is the size the level file gives it, a CollisionBox's +0x88 being its
+//    half-size - the authored boxes are just bigger than the parts. The gate's
+//    panels match theirs, so they're left at full size; see "Gate panels".)
 //  - The parts that reach furthest (the vampire's long fingers) get no box at all
 //    (size 0), and the boxes' speed is next to nothing, so a swipe can't throw a
 //    car: the hands only ever blocked or nudged.
@@ -2402,79 +2750,23 @@ static void __attribute__((thiscall)) HkKinStep(BYTE* set) {
     HazardResets();
     HazardStep(set);
 }
-// Gate panels (thin, upright parts: the graveyard's swinging gate) hang from a
-// hinge at a top corner: the part's origin is there, and the panel reaches out
-// along its second axis and down. The game centres each box on the origin, so
-// the gate's boxes floated above the track (no collision; at the old double
-// size, invisible walls around it). A panel's box is moved to the panel: half
-// its width out, half its height down. (Found from where cars touched the
-// double-size boxes.)
-// The bottom edges of the gate let cars through (the panels' lower boards reach
-// below their parts' size), so each panel's box also reaches kPanelSkirt lower.
-static const float kPanelSkirt = 8.0f;
-struct PanelSide { BYTE* box; float side; };
-static PanelSide g_panelSide[32];
-static int g_panelNext = 0;
-typedef float* (__attribute__((thiscall)) *KinPose_t)(BYTE*, float*);
-static float* __attribute__((thiscall)) HkKinPose(BYTE* box, float* out) {
-    float* m = reinterpret_cast<KinPose_t>(hot::fnKinPose)(box, out);
-    const float* size = PartSize(box);
-    if (g_cfg.hazardGateFix && IsPanel(size, m)) {
-        float side = 0.0f;                                      // (0 until the gate's set is set up)
-        for (const PanelSide& p : g_panelSide) if (p.box == box) { side = p.side; break; }
-        float out1 = size[1] * 0.5f * side, down = (size[2] * 0.5f + kPanelSkirt * 0.5f) * (m[9] > 0.0f ? 1.0f : -1.0f);
-        if (side != 0.0f)
-            for (int i = 0; i < 3; i++) m[12 + i] += m[4 + i] * out1 - m[8 + i] * down;
-    }
-    return m;
-}
-// Which way along its width each panel reaches from its hinge: towards the
-// middle of the gate (the panels of a gate hang from posts at its sides). Found
-// once the gate's boxes are set up, from the hinges' positions.
-static void SetPanelSides(BYTE* set) {
-    BYTE* boxes = *reinterpret_cast<BYTE**>(set + 0xC);
-    DWORD n = *reinterpret_cast<DWORD*>(set + 0x10);
-    float c[3] = { 0, 0, 0 }; int cn = 0;
-    static float raw[32][16];                                   // the hinges' own poses (0x5F2070 itself)
-    for (DWORD i = 0; boxes && i < n && i < 32; i++) {
-        BYTE* b = boxes + i * 0x7C; const float* m = raw[i];
-        raw[i][9] = 0.0f;                                       // (not upright: not a panel, unless set below)
-        const float* lo = reinterpret_cast<const float*>(b + 0x54);
-        if (reinterpret_cast<const float*>(b + 0x60)[0] - lo[0] < 0.01f) continue;   // an unused box (no part: no mesh data)
-        const float* sz = PartSize(b);
-        if (!sz || sz[0] < 0.01f) continue;
-        reinterpret_cast<KinPose_t>(hot::fnKinPose)(b, raw[i]);
-        if (!IsPanel(sz, m)) continue;
-        for (int k = 0; k < 3; k++) c[k] += m[12 + k];
-        cn++;
-    }
-    if (cn < 2) return;                                         // one panel: no middle to go by
-    for (int k = 0; k < 3; k++) c[k] /= cn;
-    for (DWORD i = 0; i < n && i < 32; i++) {
-        BYTE* b = boxes + i * 0x7C; const float* m = raw[i];
-        if (m[9] == 0.0f) continue;                             // (skipped above)
-        const float* sz = PartSize(b);
-        if (!sz || sz[0] < 0.01f || !IsPanel(sz, m)) continue;
-        float d[3] = { c[0] - m[12], c[1] - m[13], c[2] - m[14] };
-        float side = Dot3(d, m + 4) < 0.0f ? -1.0f : 1.0f;
-        PanelSide* slot = nullptr;
-        for (PanelSide& p : g_panelSide) if (p.box == b || (!slot && !p.box)) { slot = &p; if (p.box == b) break; }
-        if (!slot) slot = &g_panelSide[g_panelNext++ % 32];
-        slot->box = b; slot->side = side;
-        Logf("hazards: gate panel %p reaches %s along its width\n", b, side > 0.0f ? "+" : "-");
-    }
-}
+// Gate panels (thin, upright parts: the graveyard's swinging gate). Each part's
+// collision box (a CollisionBox, obj +0x174 -> +0x10: +0x88 its half-size, +0x24
+// its frame) is authored in the level file, centred and at the right size, and
+// the game's PhysX box matches it (0x5F21D0/0x5F2260). But a panel is only
+// 1.6-2.6 thick and swings shut a unit a step: cars slipped through it. With
+// hazardGateFix=1 a panel's box is made 3 units thick.
 typedef void (__attribute__((thiscall)) *KinCreate_t)(BYTE*);
-static void __attribute__((thiscall)) HkKinCreate(BYTE* box) {  // the box's actor, at the part's real size
-    float* c = reinterpret_cast<float*>(box + 0x54);            // min x, y, z / max x, y, z
+static void __attribute__((thiscall)) HkKinCreate(BYTE* box) {  // a box's actor: halved, or a gate panel's made thicker
+    // box +0x54: min x, y, z / max x, y, z, = -/+ half the half-size; the actor's
+    // NxBox gets max - min as its dimensions (= half-sizes).
+    float* c = reinterpret_cast<float*>(box + 0x54);
     float saved[6];
     memcpy(saved, c, sizeof(saved));
-    for (int i = 0; i < 6; i++) c[i] *= 0.5f;
-    // A gate panel is 0.8-1.3 thick and swings shut at 60 units/s, a unit a step:
-    // cars slipped through it. Its box is made 3 units thick.
-    if (g_cfg.hazardGateFix && IsPanel(PartSize(box), reinterpret_cast<const float*>(box + 0x14))) {
-        if (c[3] < 1.5f) { c[0] = -1.5f; c[3] = 1.5f; }
-        c[2] -= kPanelSkirt * 0.5f; c[5] += kPanelSkirt * 0.5f;    // (taller by kPanelSkirt; HkKinPose moves it down by half)
+    if (IsPanel(PartSize(box), reinterpret_cast<const float*>(box + 0x14))) {   // (a gate panel: never halved)
+        if (g_cfg.hazardGateFix && c[3] - c[0] < 1.5f) { c[0] = -0.75f; c[3] = 0.75f; }   // (3 thick: half-size 1.5)
+    } else {
+        for (int i = 0; i < 6; i++) c[i] *= 0.5f;               // (the slabs' and hands' boxes, see above)
     }
     reinterpret_cast<KinCreate_t>(hot::fnKinCreate)(box);
     memcpy(c, saved, sizeof(saved));
@@ -2483,11 +2775,6 @@ typedef void (__attribute__((thiscall)) *KinSetup_t)(BYTE*, void*, void*, DWORD)
 static void __attribute__((thiscall)) HkKinSetup(BYTE* set, void* model, void* a2, DWORD flag) {
     reinterpret_cast<KinSetup_t>(hot::fnKinSetup)(set, model, a2, flag);
     TuningFlush();                                              // (a track is loading: its numbers are in)
-    if (g_cfg.hazardGateFix) {                                  // (old entries for these boxes: a new track)
-        BYTE* bx = *reinterpret_cast<BYTE**>(set + 0xC); DWORD bn = *reinterpret_cast<DWORD*>(set + 0x10);
-        for (PanelSide& p : g_panelSide) if (p.box >= bx && p.box < bx + bn * 0x7C) p.box = nullptr;
-        SetPanelSides(set);
-    }
     BYTE* boxes = *reinterpret_cast<BYTE**>(set + 0xC);
     DWORD n = *reinterpret_cast<DWORD*>(set + 0x10);
     if (++g_hzLogged > 40) return;
@@ -2513,8 +2800,6 @@ static void InstallHazards() {
         !PatchCall(hot::callKinSetup, reinterpret_cast<void*>(&HkKinSetup), 5) ||
         !PatchCall(hot::callKinCreate, reinterpret_cast<void*>(&HkKinCreate), 5) ||
         !PatchCall(hot::callKinStep, reinterpret_cast<void*>(&HkKinStep), 5) ||
-        !PatchCall(hot::callKinPose[0], reinterpret_cast<void*>(&HkKinPose), 5) ||
-        !PatchCall(hot::callKinPose[1], reinterpret_cast<void*>(&HkKinPose), 5) ||
         !PatchJmp(hot::contactFilter, reinterpret_cast<DWORD>(&HkContactFilter))) {
         Logf("hazards: patch FAILED\n");
         return;
@@ -2912,12 +3197,16 @@ static void __attribute__((thiscall)) HkBrainTargets(BYTE* brain) {
     }
 }
 static void InstallSpeedBlur() {
-    if (g_cfg.speedBlur <= 0.0f) return;
-    if (!g_cfg.interpolate) { Logf("speed blur: needs interpolate=1 (it uses the speed FOV's car speed)\n"); return; }
+    // (the HDR region settings are always noted, for the log)
+    if (!PatchCall(hot::callHdrPrint, reinterpret_cast<void*>(&HdrParamNote), 5)) Logf("hdr: patch FAILED\n");
+    bool blur = g_cfg.speedBlur > 0.0f;
+    if (blur && !g_cfg.interpolate) { Logf("speed blur: needs interpolate=1 (it uses the speed FOV's car speed)\n"); blur = false; }
+    if (!blur && !HdrActive()) return;
     const BYTE jmp = 0xEB;
     if (!PatchCall(hot::blurAmount, reinterpret_cast<void*>(&SpeedBlurStub), 6) ||
-        !PatchBytes(hot::blurFlagLevel, &jmp, 1)) { Logf("speed blur: patch FAILED\n"); return; }
-    Logf("speed blur: up to %.2f, from %.0f to %.0f units/s\n", g_cfg.speedBlur, g_cfg.speedBlurMin, g_cfg.speedBlurMax);
+        (blur && !PatchBytes(hot::blurFlagLevel, &jmp, 1))) { Logf("speed blur: patch FAILED\n"); return; }
+    if (blur) Logf("speed blur: up to %.2f, from %.0f to %.0f units/s\n", g_cfg.speedBlur, g_cfg.speedBlurMin, g_cfg.speedBlurMax);
+    if (HdrActive()) Logf("hdr: brightness x%.2f, bloom x%.2f, bloom threshold x%.2f\n", g_cfg.hdrBrightness, g_cfg.hdrBloom, g_cfg.hdrBloomThreshold);
 }
 static void InstallRampage() {
     if (g_cfg.rampageTopSpeed > 0.0f && g_cfg.rampageTopSpeed != 0.45f) {
@@ -2968,11 +3257,22 @@ static int g_sparkDepth = 0;
 static DWORD g_sparkSwitched[50];                                // types switched from dots to streaks (car hits): their texture then
                                                                  // (a slot a later level fills with another type no longer matches)
 static DWORD g_sparkBudgetMs = 0; static float g_sparkBudget = 0.0f;
+// The hit's strength: set while the game throws a collision's sparks (HkCollSparks), 0 otherwise.
+static float g_sparkImpact = 0.0f;
+// How big this hit's sparks are: impact / sparkImpactRef, 0.5 to sparkImpactMax (1 outside a collision).
+// (Hits measured in a race ran about 3300 to 5300, averaging 3800.)
+static float SparkScale() {
+    if (g_sparkImpact <= 0.0f || g_cfg.sparkImpactRef <= 0.0f) return 1.0f;
+    float k = g_sparkImpact / g_cfg.sparkImpactRef;
+    float mx = g_cfg.sparkImpactMax > 1.0f ? g_cfg.sparkImpactMax : 1.0f;
+    return k < 0.5f ? 0.5f : (k > mx ? mx : k);
+}
 extern "C" void __cdecl SparkSpawned(BYTE* P, int type, BYTE* sys) {
     if (!P || !sys || type < 0 || type >= 50) return;
     const BYTE* E = sys + 0x1CC3C28 + type * 0x3C;
     if (!(*reinterpret_cast<const DWORD*>(E + 0x28) & 4)) return;   // streak sparks only (not smoke)
     bool carHit = g_sparkSwitched[type] && g_sparkSwitched[type] == *reinterpret_cast<const DWORD*>(E);
+    float hit = SparkScale();
     if (g_sparkDepth == 0 && g_cfg.sparkCount > 0 && carHit) {  // (the extras' own births don't bring more)
         DWORD now = GetTickCount();                             // budget: sparkRate extras a second, a quarter second's worth banked
         g_sparkBudget += (now - g_sparkBudgetMs) * 0.001f * g_cfg.sparkRate;
@@ -2985,7 +3285,8 @@ extern "C" void __cdecl SparkSpawned(BYTE* P, int type, BYTE* sys) {
         memcpy(pos, P + 4, 12); memcpy(v0, P + 0x10, 12); memcpy(acc, P + 0x1C, 12);
         float sp = sqrtf(Dot3(v0, v0));
         if (sp < 8.0f) sp = 8.0f;                               // (a light scrape still throws them)
-        for (int i = 0; i < g_cfg.sparkCount && i < 32 && g_sparkBudget >= 1.0f; i++, g_sparkBudget -= 1.0f) {
+        int extra = (int)(g_cfg.sparkCount * hit + 0.5f);          // harder hits throw more
+        for (int i = 0; i < extra && i < 32 && g_sparkBudget >= 1.0f; i++, g_sparkBudget -= 1.0f) {
             float v[3];
             float k = 0.5f + Rand01();                          // 0.5 - 1.5 x as fast
             for (int a = 0; a < 3; a++) v[a] = v0[a] * k + sp * g_cfg.sparkSpread * (2.0f * Rand01() - 1.0f);
@@ -2994,13 +3295,43 @@ extern "C" void __cdecl SparkSpawned(BYTE* P, int type, BYTE* sys) {
         }
         g_sparkDepth = 0;
     }
-    float v = g_cfg.sparkVary;
+    // Its own shape: a size, and somewhere between a long thin needle and a short
+    // fat flake; a stronger hit's sparks are longer, wider and faster.
+    float v = g_cfg.sparkVary, len = hit, wid = sqrtf(hit);
     if (v > 0.0f) {
-        float len = 1.0f + v * (2.0f * Rand01() - 1.0f);        // e.g. 0.4 - 1.6 for 0.6
-        float wid = 1.0f + v * (2.0f * Rand01() - 1.0f);
-        *reinterpret_cast<float*>(P + 0x48) *= len;
-        *reinterpret_cast<float*>(P + 0x30) *= wid;
-        *reinterpret_cast<float*>(P + 0x34) *= wid;
+        float size = 1.0f + v * (2.0f * Rand01() - 1.0f);       // e.g. 0.4 - 1.6 for 0.6
+        float u = 2.0f * Rand01() - 1.0f;                       // -1 flake ... +1 needle
+        len *= size * (1.0f + 0.5f * u);
+        wid *= size * (1.0f - 0.4f * u);
+    }
+    *reinterpret_cast<float*>(P + 0x48) *= len;
+    *reinterpret_cast<float*>(P + 0x30) *= wid;
+    *reinterpret_cast<float*>(P + 0x34) *= wid;
+    // Its own flight: the streak lies along its velocity, so turning that turns
+    // the spark - up to sparkTwist degrees off its course - and a heavier or
+    // lighter fall (gravity x 0.5-1.5) bends some into arcs; it lives 0.7-1.3 x
+    // as long.
+    float* vel = reinterpret_cast<float*>(P + 0x10);
+    float sp = sqrtf(Dot3(vel, vel));
+    if (sp > 1e-3f) {
+        float sk = sqrtf(hit);
+        if (g_cfg.sparkTwist > 0.0f) {
+            float r[3] = { 2.0f * Rand01() - 1.0f, 2.0f * Rand01() - 1.0f, 2.0f * Rand01() - 1.0f };
+            float tw = g_cfg.sparkTwist < 80.0f ? g_cfg.sparkTwist : 80.0f;   // (tan: keep well short of 90)
+            float t = tanf(Rand01() * tw * (3.14159265f / 180.0f));
+            float rd = Dot3(r, vel) / sp;                               // r made square to the course: turns it, never
+            for (int a = 0; a < 3; a++) r[a] -= vel[a] / sp * rd;       //   back on itself
+            float rl = sqrtf(Dot3(r, r));
+            if (rl > 1e-3f) {
+                for (int a = 0; a < 3; a++) vel[a] = vel[a] / sp + r[a] / rl * t;
+                float nl = sqrtf(Dot3(vel, vel));
+                for (int a = 0; a < 3; a++) vel[a] *= sp * sk / nl;
+            }
+        } else for (int a = 0; a < 3; a++) vel[a] *= sk;
+        float* acc = reinterpret_cast<float*>(P + 0x1C);
+        float gk = 0.5f + Rand01();
+        for (int a = 0; a < 3; a++) acc[a] *= gk;
+        *reinterpret_cast<float*>(P) *= 0.7f + 0.6f * Rand01();
     }
     if (g_cfg.sparkHot > 0.0f) {
         float h = Rand01(); h = h * h * g_cfg.sparkHot;         // most a little, a few a lot
@@ -3049,10 +3380,11 @@ static void SparkSetup() {
 // the car, and no sparks are thrown; mostly across it is a wall or a car.
 typedef void (__attribute__((thiscall)) *CollSparks_t)(BYTE*, BYTE*, BYTE*, float);
 typedef void (__attribute__((thiscall)) *ContactVec_t)(BYTE*, float*, BYTE*, int);
-static LONG g_sparkFloorSkipped = 0, g_sparkSideKept = 0;
+static LONG g_sparkFloorSkipped = 0, g_sparkSideKept = 0, g_sparkImpactN = 0;
+static float g_sparkImpactMax = 0.0f, g_sparkImpactMin = 0.0f, g_sparkImpactSum = 0.0f;
 static void __attribute__((thiscall)) HkCollSparks(BYTE* self, BYTE* contact, BYTE* mover, float impact) {
     bool skip = false;
-    if (contact && mover && g_cfg.sparkFloor < 1.0f) {
+    if (contact && mover && g_cfg.sparkFloor < 1.0f) {   // (the road filter)
         float n[3] = { 0, 0, 0 };
         reinterpret_cast<ContactVec_t>(hot::fnContactVec)(contact, n, mover, 1);
         const float* up = reinterpret_cast<const float*>(mover + 0x10) + 4;   // the car's matrix, row 1
@@ -3065,20 +3397,32 @@ static void __attribute__((thiscall)) HkCollSparks(BYTE* self, BYTE* contact, BY
                 Logf("sparks: collision sparks: %ld from walls/cars, %ld from the road skipped\n", g_sparkSideKept, g_sparkFloorSkipped);
         }
     }
-    if (!skip) reinterpret_cast<CollSparks_t>(hot::fnCollSparks)(self, contact, mover, impact);
+    if (skip) return;
+    if (impact > 0.0f) {                                        // (for the log: the hits' range, to set sparkImpactRef by)
+        if (impact > g_sparkImpactMax) g_sparkImpactMax = impact;
+        if (g_sparkImpactMin <= 0.0f || impact < g_sparkImpactMin) g_sparkImpactMin = impact;
+        g_sparkImpactSum += impact; g_sparkImpactN++;
+        if (g_sparkImpactN == 20 || g_sparkImpactN == 200)
+            Logf("sparks: hit strength over %ld hits: weakest %.0f, average %.0f, strongest %.0f (sparkImpactRef %.0f)\n",
+                 g_sparkImpactN, g_sparkImpactMin, g_sparkImpactSum / g_sparkImpactN, g_sparkImpactMax, g_cfg.sparkImpactRef);
+    }
+    g_sparkImpact = impact;
+    reinterpret_cast<CollSparks_t>(hot::fnCollSparks)(self, contact, mover, impact);
+    g_sparkImpact = 0.0f;
 }
 static void InstallSparks() {
-    if (g_cfg.sparkFloor < 1.0f) {
+    if (g_cfg.sparkFloor < 1.0f || (g_cfg.sparkStreaks && g_cfg.sparkImpactRef > 0.0f)) {
         if (!PatchCall(hot::callCollSparks1, reinterpret_cast<void*>(&HkCollSparks), 5) ||
             !PatchCall(hot::callCollSparks2, reinterpret_cast<void*>(&HkCollSparks), 5)) Logf("sparks: road filter patch FAILED\n");
-        else Logf("sparks: no collision sparks from the road under the car (sparkFloor %.2f)\n", g_cfg.sparkFloor);
+        else Logf("sparks: collision sparks hooked (road filter %.2f, size by hit strength / %.0f)\n", g_cfg.sparkFloor, g_cfg.sparkImpactRef);
     }
     if (!g_cfg.sparkStreaks) return;
     g_sparkLength = g_cfg.sparkLength > 0.0f ? g_cfg.sparkLength : 0.25f;
     BYTE fld[6] = { 0xD9, 0x05 };                               // fld dword ptr [&g_sparkLength]
     DWORD a = reinterpret_cast<DWORD>(&g_sparkLength); memcpy(fld + 2, &a, 4);
     if (!PatchBytes(hot::sparkStreakLen, fld, 6) ||
-         ((g_cfg.sparkVary > 0.0f || g_cfg.sparkHot > 0.0f || g_cfg.sparkCount > 0) &&
+         ((g_cfg.sparkVary > 0.0f || g_cfg.sparkHot > 0.0f || g_cfg.sparkCount > 0 ||
+           g_cfg.sparkImpactRef > 0.0f || g_cfg.sparkTwist > 0.0f) &&
          !PatchCall(hot::sparkSpawnEnd, reinterpret_cast<void*>(&SparkSpawnStub), 6))) { Logf("sparks: patch FAILED\n"); return; }
     Logf("sparks: dotted sparks drawn as streaks, %.2f s of travel long, x%.1f wide; size +-%.0f%%, hot %.2f; "
          "%d more a car-hit spark, %.0f/s at most (spread %.2f, up %.2f)\n", g_sparkLength, g_cfg.sparkWidth, g_cfg.sparkVary * 100.0f,
@@ -3086,10 +3430,357 @@ static void InstallSparks() {
 }
 
 // ---------------------------------------------------------------------------
+// Scrape sound. Each car's collision-audio helper plays its surface's looping
+// "contact" sound while it grinds along a wall (0x65B290) or another car
+// (0x65B4A0): it copies the surface material's sample into the car's sound at
+// car+0x13C (0x5C41C0, called at 0x65B2F1 / 0x65B501), then plays it at the
+// car, its volume following the speed, kept alive while the contact lasts.
+// But no PC surface names a contact sample, so it stayed silent - while the
+// "materials" sound bank ([0x968914]) has one: "metalscrape". Those two copies
+// are hooked: an empty sample becomes metalscrape (bound once, 0x5C38E0), and
+// the game does the rest, for every car.
+// ---------------------------------------------------------------------------
+static BYTE g_scrapeSnd[0x14];                                  // the game's sound handle (+0 the sample)
+static BYTE* g_scrapeBank = nullptr; static int g_scrapeTries = 0;
+typedef void (__attribute__((thiscall)) *SndCopy_t)(BYTE*, const BYTE*);
+typedef void (__attribute__((thiscall)) *SndBind_t)(BYTE*, BYTE*, const char*, int);
+static void __attribute__((thiscall)) HkContactCopy(BYTE* dst, const BYTE* src) {
+    if (!src || !*reinterpret_cast<const DWORD*>(src)) {       // the surface has no contact sound
+        BYTE* bank = *reinterpret_cast<BYTE**>(hot::sndMaterialsBank);
+        if (bank && (bank != g_scrapeBank || (!*reinterpret_cast<DWORD*>(g_scrapeSnd) && g_scrapeTries < 3))) {
+            if (bank != g_scrapeBank) { memset(g_scrapeSnd, 0, sizeof(g_scrapeSnd)); g_scrapeTries = 0; g_scrapeBank = bank; }
+            g_scrapeTries++;
+            reinterpret_cast<SndBind_t>(hot::fnSndBind)(g_scrapeSnd, bank, "metalscrape", 1);
+            Logf("scrape sound: metalscrape %s\n", *reinterpret_cast<DWORD*>(g_scrapeSnd) ? "found" : "NOT found in the materials bank");
+        }
+        if (*reinterpret_cast<DWORD*>(g_scrapeSnd)) src = g_scrapeSnd;
+    }
+    reinterpret_cast<SndCopy_t>(hot::fnSndCopy)(dst, src);
+    // metalscrape plays as a one-shot of a few hundredths of a second (its loop
+    // flag isn't set in the PC bank): while the contact lasts its voice is kept
+    // going as a loop (voice +0x18 loop, +0x34 time left = +0x30 its length)
+    if (src == g_scrapeSnd) {
+        BYTE* v = *reinterpret_cast<BYTE**>(dst + 4);
+        if (v) { v[0x18] = 1; *reinterpret_cast<float*>(v + 0x34) = *reinterpret_cast<float*>(v + 0x30); }
+    }
+}
+static void InstallScrapeSound() {
+    if (!g_cfg.scrapeSound) return;
+    if (!PatchCall(hot::callContactCopy1, reinterpret_cast<void*>(&HkContactCopy), 5) ||
+        !PatchCall(hot::callContactCopy2, reinterpret_cast<void*>(&HkContactCopy), 5)) { Logf("scrape sound: patch FAILED\n"); return; }
+    Logf("scrape sound: the game's metalscrape where a surface has no contact sound\n");
+}
+
+// ---------------------------------------------------------------------------
+// Menu fixes.
+//  - The 2D (menus, HUD) is drawn through an ortho projection (0x540C20:
+//    2/W, 2/H, no flip) from vertices made screen-centred by three routines
+//    (0x53C250, 0x53C310, 0x55A0B0): x - W/2 - 0.5 and H/2 - y - 0.5. The 0.5
+//    is D3D9's half-pixel offset, right for x but with the wrong sign for y: on
+//    screen everything lands half a pixel too low - and an edge meant for
+//    y = 0 starts at 0.5, so the top row is never covered: the menu's black
+//    band leaves a line of the background showing. fsubrp -> faddp: H/2 - y + 0.5.
+//  - Track select: left/right (CSII_ScrollDialog 0x67E250 / 0x67E350) tells
+//    the state (0x4806F0), which writes the new track's name into the text
+//    shown on the centre card (state +0x5B4, at 0x48073C) at once; the cards
+//    only start sliding (and the name hides) on the next update. For a frame
+//    the old card has the new name. The write is held back: it's made two of
+//    the dialog's updates later (whichever side of the update the input came
+//    from, the slide is under way by then), and only by that same dialog.
+static void* g_tnDst; static void* g_tnDlg; static const void* g_tnName; static DWORD g_tnAt; static DWORD g_dlgUpdates;
+static bool g_tnPending;
+static void* __cdecl HkTrackName(void* dst, const void* name) {   // (name: the string table's own string object, 0x59E730)
+    BYTE* state = static_cast<BYTE*>(dst) - 0x5B4;
+    g_tnDst = dst; g_tnDlg = *reinterpret_cast<void**>(state + 0x5CC);
+    g_tnName = name;
+    g_tnAt = g_dlgUpdates; g_tnPending = true;
+    return dst;                                                 // (the caller ignores it)
+}
+static ThisVoid_t g_scrollDlgUpd;                               // (thiscall, BYTE* this)
+static void __attribute__((thiscall)) HkScrollDlgUpd(BYTE* dlg) {
+    if (dlg == g_tnDlg) g_dlgUpdates++;                        // (that dialog's updates only: others may update too)
+    if (g_tnPending && dlg == g_tnDlg && g_dlgUpdates - g_tnAt >= 2 &&
+        *reinterpret_cast<BYTE**>(dlg + 0xD8) == static_cast<BYTE*>(g_tnDst) - 0x5B4) {   // (still that state's dialog)
+        g_tnPending = false;
+        // (exactly as the game calls it: its "format" is a string object - the
+        // string table's entry for the name, which stays put - not a char*)
+        reinterpret_cast<void* (__cdecl *)(void*, const void*)>(hot::fnStrFormat)(g_tnDst, g_tnName);
+    }
+    g_scrollDlgUpd(dlg);
+}
+static void InstallMenuFixes() {
+    if (!g_cfg.menuFixes) return;
+    static const BYTE faddp[2] = { 0xDE, 0xC1 };
+    bool ok = true;
+    for (DWORD at : hot::ui2DYSub) ok = ok && PatchBytes(at, faddp, 2);
+    g_scrollDlgUpd = *reinterpret_cast<ThisVoid_t*>(hot::vtScrollDlgUpd);
+    ok = ok && PatchCall(hot::callTrackName, reinterpret_cast<void*>(&HkTrackName), 5) &&
+         PatchPointer(reinterpret_cast<void**>(hot::vtScrollDlgUpd), reinterpret_cast<void*>(&HkScrollDlgUpd));
+    Logf(ok ? "menus: 2D half-pixel offset fixed, track names change with their cards\n" : "menus: patch FAILED\n");
+}
+
+// ---------------------------------------------------------------------------
+// Race music at GO. The race's track is opened while the race loads
+// (GSWorldInitState_c, 0x47C5CF) and started by the intro (GSBaseIntroState_c,
+// 0x4796B0, every mode's intro): its countdown step calls Music play (0x538C20)
+// every frame (0x479780), so it plays under the 3-2-1. That call is dropped and
+// the track is started at GO instead, where the intro clears its "countdown on"
+// byte (0x4797BF: mov byte ptr [0x959F80],0 - done here too). Leaving the pause
+// menu plays the music if it isn't paused (0x47E6D2, 0x47EEF0): during the
+// countdown it's only opened, so that would start it early - held until GO.
+// A restart (GSWorldResetState_c) re-opens the track and runs the intro again.
+static void __cdecl MusicIntroFrame() {}                       // (the countdown's per-frame play: nothing)
+static void __cdecl MusicAtGo() {
+    *reinterpret_cast<volatile BYTE*>(hot::introActive) = 0;   // (what the patched instruction did)
+    reinterpret_cast<VoidFn_t>(hot::fnMusicPlay)();
+}
+static void __cdecl MusicPauseResume() {
+    if (*reinterpret_cast<volatile BYTE*>(hot::introActive)) return;   // (still counting down: GO starts it)
+    reinterpret_cast<VoidFn_t>(hot::fnMusicPlay)();
+}
+static void InstallMusicAtGo() {
+    if (!g_cfg.musicAtGo) return;
+    bool ok = PatchCall(hot::callIntroPlay, reinterpret_cast<void*>(&MusicIntroFrame), 5) &&
+              PatchCall(hot::movIntroGo, reinterpret_cast<void*>(&MusicAtGo), 7) &&
+              PatchCall(hot::callPauseResume1, reinterpret_cast<void*>(&MusicPauseResume), 5) &&
+              PatchCall(hot::callPauseResume2, reinterpret_cast<void*>(&MusicPauseResume), 5);
+    Logf(ok ? "race music: starts at GO\n" : "race music: patch FAILED\n");
+}
+
+// ---------------------------------------------------------------------------
+// Rendering fixes
+//  - Sun shadows: the PC build renders the sun's shadow (track, scenery) into
+//    an 8 x 8 shadow map (0x57D6F0: an R32F render target and a D24X8 depth
+//    surface, both 8 x 8; the caster pass's viewport 8 x 8 at 0x57C28F;
+//    g_ShadowMapSize 8.0 at 0x54A70D). Spread over the 64 units in front of the
+//    camera it's a blur: a dark patch round the car that comes and goes. The
+//    two creates are replaced (shadowMapSize x shadowMapSize), the viewport
+//    and g_ShadowMapSize follow. The shadow's reach (0x436xxx, each constant
+//    read there only: 64 deep, fading over the last 16; width 128) is
+//    shadowRange deep, fading over shadowFade, twice as wide as deep.
+//    The shadow "camera" (0x64DBD0 -> 0x64CE70/0x64C570) is an orthographic
+//    box fitted round the stretch of track ahead of the camera, looking down the
+//    sun. But its depth range is thin: it starts only "fade width" (16) toward
+//    the sun from the box centre and ends at "reach" (64) - so whatever is
+//    higher up toward the sun (a roof, a wall top) fell outside it and cast no
+//    shadow, and the edge of that moved with the camera. With shadowFit=1 the
+//    light backs off shadowBackOff units toward the sun (0x64D084) and sees to
+//    shadowFar (0x64DDF9); the fade width it hands the shaders (0x64DE17) stays
+//    shadowFade. All three read our floats instead of the shared parameter block.
+//  - See-through things (glass, the glass road pieces) flickered between clear
+//    and washed out as the camera moved. Two causes:
+//    - the alpha pass (0x54B7D0) sorts its draws (0x54B8F8-0x54BB17) by pass
+//      only, not by distance, and unstably - so their order changed from frame
+//      to frame. With glassSort=1 they're sorted back to front by their depth
+//      (record +0x70), nearer last; equal ones by pass, then address.
+//    - blended materials kept writing depth (0x5470A0 only turns it off for a
+//      material flag; the blend switch 0x5420F0 only for MAX), so glass hid
+//      whatever was drawn behind it later. With glassNoZWrite=1, after the
+//      blend switch (called at 0x547204) sets a blended mode (0 add, 1 sub,
+//      2 alpha, 3 mod2x, 6 add2) depth writing is turned off (0x541FE0) for
+//      that draw; the next material sets it again as usual.
+//    - meshes (the bell jar, the glass road) go through their own lists
+//      (renderer+0xEC4128 and +0xED79A8), sorted in 0x54B7D0 only by technique
+//      class (instance +0x1FC), unstably; their see-through parts are drawn
+//      afterward in reverse list order (0x54B640) - so two glass meshes of the
+//      same class swapped places as the visible set changed. With glassSort=1
+//      both lists are sorted by class, then by the instance's address (the
+//      order the frame's scene walk made them in): the same order every frame.
+// ---------------------------------------------------------------------------
+static float g_shadowSizeF = 8.0f;
+static DWORD g_shadowSize = 8;
+typedef HRESULT (__stdcall *CreateTex_t)(void*, UINT, UINT, UINT, DWORD, DWORD, DWORD, void**, void*);
+typedef HRESULT (__stdcall *CreateDS_t)(void*, UINT, UINT, DWORD, DWORD, DWORD, BOOL, void**, void*);
+extern "C" HRESULT __cdecl ShadowCreateTex(BYTE* r) {          // replaces 0x57D7BA-0x57D7E7 (edi = r)
+    void* dev = *reinterpret_cast<void**>(r + 0xB8);
+    *reinterpret_cast<DWORD*>(r + 0x1CB6658) = 3;
+    void** vt = *reinterpret_cast<void***>(dev);
+    HRESULT hr = reinterpret_cast<CreateTex_t>(vt[0x5C / 4])(dev, g_shadowSize, g_shadowSize, 1, 1 /* RENDERTARGET */,
+        0x72 /* R32F */, 0 /* DEFAULT */, reinterpret_cast<void**>(r + 0xA4), nullptr);
+    if (hr < 0 && g_shadowSize != 8) {                          // (too big for this card: the game's size)
+        Logf("shadows: %ux%u shadow map not made (%08lX), 8x8 kept\n", g_shadowSize, g_shadowSize, (unsigned long)hr);
+        g_shadowSize = 8;
+        hr = reinterpret_cast<CreateTex_t>(vt[0x5C / 4])(dev, 8, 8, 1, 1, 0x72, 0, reinterpret_cast<void**>(r + 0xA4), nullptr);
+    }
+    return hr;
+}
+extern "C" HRESULT __cdecl ShadowCreateDepth(BYTE* r, void** out) {   // replaces 0x57D7F8-0x57D815 (edi = r, ebx = out)
+    void* dev = *reinterpret_cast<void**>(r + 0xB8);
+    void** vt = *reinterpret_cast<void***>(dev);
+    HRESULT hr = reinterpret_cast<CreateDS_t>(vt[0x74 / 4])(dev, g_shadowSize, g_shadowSize, 0x4D /* D24X8 */, 0, 0, TRUE, out, nullptr);
+    static int logged = 0;
+    if (logged++ < 2) Logf("shadows: sun shadow map %ux%u %s\n", g_shadowSize, g_shadowSize, hr >= 0 ? "made" : "FAILED");
+    // the caster pass's viewport and the shaders' g_ShadowMapSize follow the size made
+    DWORD vp = g_shadowSize;
+    PatchBytes(hot::shadowViewport + 1, &vp, 4);
+    g_shadowSizeF = (float)g_shadowSize;
+    return hr;
+}
+extern "C" void ShadowTexStub(); extern "C" void ShadowDepthStub();
+extern "C" { DWORD g_shadowTexCont = hot::shadowTexEnd; DWORD g_shadowDepthCont = hot::shadowDepthEnd; }
+asm(".text\n"
+    ".globl _ShadowTexStub\n_ShadowTexStub:\n"     // jmp from 0x57D7BA; on to 0x57D7E7 with eax = HRESULT
+    "    pushl %edi\n"
+    "    call _ShadowCreateTex\n"
+    "    addl $4, %esp\n"
+    "    jmp *_g_shadowTexCont\n"
+    ".globl _ShadowDepthStub\n_ShadowDepthStub:\n"   // jmp from 0x57D7F8; on to 0x57D815 with eax = HRESULT
+    "    pushl %ebx\n"
+    "    pushl %edi\n"
+    "    call _ShadowCreateDepth\n"
+    "    addl $8, %esp\n"
+    "    movl 0xB8(%edi), %edi\n"                  // (as the original left it)
+    "    jmp *_g_shadowDepthCont\n");
+static float g_shadowDepth = 64.0f, g_shadowFadeW = 16.0f, g_shadowWide = 128.0f;
+
+static float g_shadowBackOff = 1000.0f, g_shadowFar = 2000.0f, g_shadowFadeOut = 16.0f;
+static int __cdecl AlphaRecCmp(const void* a, const void* b) {
+    const BYTE* ra = *static_cast<BYTE* const*>(a);
+    const BYTE* rb = *static_cast<BYTE* const*>(b);
+    int pa = *reinterpret_cast<const int*>(ra), pb = *reinterpret_cast<const int*>(rb);
+    if (pa != pb) return pa < pb ? -1 : 1;                      // (pass first, as the game)
+    float za = *reinterpret_cast<const float*>(ra + 0x70), zb = *reinterpret_cast<const float*>(rb + 0x70);
+    if (za != zb) return za > zb ? -1 : 1;                      // farther (larger) first
+    return ra < rb ? -1 : (ra > rb ? 1 : 0);
+}
+extern "C" void __cdecl AlphaSort(BYTE** list, int count) {
+    if (list && count > 1 && count < 100000) qsort(list, count, sizeof(BYTE*), AlphaRecCmp);
+}
+static int __cdecl MeshInstCmp(const void* a, const void* b) {
+    const BYTE* ia = *static_cast<BYTE* const*>(a);
+    const BYTE* ib = *static_cast<BYTE* const*>(b);
+    int ka = *reinterpret_cast<const int*>(ia + 0x1FC), kb = *reinterpret_cast<const int*>(ib + 0x1FC);
+    if (ka != kb) return ka < kb ? -1 : 1;                      // technique class first, as the game (draws go by its ranges)
+    return ia < ib ? -1 : (ia > ib ? 1 : 0);
+}
+extern "C" void __cdecl MeshSort(BYTE** list, int count) {
+    if (list && count > 1 && count < 100000) qsort(list, count, sizeof(BYTE*), MeshInstCmp);
+}
+extern "C" void MeshSortStub1(); extern "C" void MeshSortStub2();
+extern "C" { DWORD g_meshSort1Cont = hot::meshSort2; DWORD g_meshSort2Cont = hot::meshSortEnd; }
+asm(".text\n"
+    ".globl _MeshSortStub1\n_MeshSortStub1:\n"   // jmp from 0x54BB17: esi = group, ebx = renderer; on to 0x54BD77
+    "    pushal\n"
+    "    movl (%esi), %ecx\n"
+    "    leal 0xEC4128(%ebx,%ecx,4), %edx\n"
+    "    pushl 4(%esi)\n"
+    "    pushl %edx\n"
+    "    call _MeshSort\n"
+    "    addl $8, %esp\n"
+    "    popal\n"
+    "    jmp *_g_meshSort1Cont\n"
+    ".globl _MeshSortStub2\n_MeshSortStub2:\n"   // jmp from 0x54BD77; on to 0x54BFE7
+    "    pushal\n"
+    "    movl 8(%esi), %ecx\n"
+    "    leal 0xED79A8(%ebx,%ecx,4), %edx\n"
+    "    pushl 0xC(%esi)\n"
+    "    pushl %edx\n"
+    "    call _MeshSort\n"
+    "    addl $8, %esp\n"
+    "    popal\n"
+    "    jmp *_g_meshSort2Cont\n");
+extern "C" void AlphaSortStub();
+extern "C" { DWORD g_alphaSortCont = hot::alphaSortEnd; }
+asm(".text\n"
+    ".globl _AlphaSortStub\n_AlphaSortStub:\n"   // jmp from 0x54B8F8: eax = count, esi = segment, ebx = renderer; on to 0x54BB17
+    "    pushal\n"
+    "    movl 0x10(%esi), %ecx\n"
+    "    leal 0xD53628(%ebx,%ecx,4), %edx\n"     // the segment's draws in the alpha list
+    "    pushl %eax\n"
+    "    pushl %edx\n"
+    "    call _AlphaSort\n"
+    "    addl $8, %esp\n"
+    "    popal\n"
+    "    jmp *_g_alphaSortCont\n");
+typedef void (__attribute__((thiscall)) *BlendMode_t)(BYTE*, int);
+static void __attribute__((thiscall)) HkBlendMode(BYTE* r, int mode) {
+    reinterpret_cast<BlendMode_t>(hot::fnBlendMode)(r, mode);
+    if (mode == 0 || mode == 1 || mode == 2 || mode == 3 || mode == 6)
+        reinterpret_cast<BlendMode_t>(hot::fnZWrite)(r, 0);
+}
+// Sky. The level's sky (its SKY_ node, drawn first by 0x53E650) is centred on
+// the camera, scale 1, with the far plane set to 5000 for it (0x53E7B9) - with
+// the wider speed-FOV view a black hole showed at the top of it. skyFar: the
+// sky's own far plane (0x53E7BB reads our value; 0x8AA444 itself has 11 other
+// users); skyStretch: the sky's world matrix (both instances, 0x53E84F and
+// 0x53EA33: they load the SetWorld call) gets its up axis scaled, so its rim
+// stays above a wider view.
+static float g_skyFar = 5000.0f;
+extern "C" { float g_skyStretch = 1.0f; }             // (read by the stub below)
+extern "C" void SkyWorldStub();
+asm(".text\n"
+    ".globl _SkyWorldStub\n_SkyWorldStub:\n"     // called instead of the renderer's SetWorld (vtable +0x224): ecx = renderer, the matrix by value at [esp+4]
+    "    flds 0x14(%esp)\n    fmuls _g_skyStretch\n    fstps 0x14(%esp)\n"   // row 1 (up): x y z
+    "    flds 0x18(%esp)\n    fmuls _g_skyStretch\n    fstps 0x18(%esp)\n"
+    "    flds 0x1C(%esp)\n    fmuls _g_skyStretch\n    fstps 0x1C(%esp)\n"
+    "    movl (%ecx), %eax\n"
+    "    jmp *0x224(%eax)\n");
+static void InstallRendering() {
+    if (g_cfg.skyFar > 5000.0f) {
+        g_skyFar = g_cfg.skyFar;
+        DWORD a = reinterpret_cast<DWORD>(&g_skyFar);
+        if (!PatchBytes(hot::skyFarLd + 2, &a, 4)) Logf("sky: far plane patch FAILED\n");
+        else Logf("sky: far plane %.0f (game: 5000)\n", g_skyFar);
+    }
+    if (g_cfg.skyStretch > 1.0f) {
+        g_skyStretch = g_cfg.skyStretch > 4.0f ? 4.0f : g_cfg.skyStretch;
+        BYTE mv[6] = { 0xBA, 0, 0, 0, 0, 0x90 };              // mov edx, SkyWorldStub / nop
+        DWORD a = reinterpret_cast<DWORD>(&SkyWorldStub); memcpy(mv + 1, &a, 4);
+        if (!PatchBytes(hot::skySetWorld1, mv, 6) || !PatchBytes(hot::skySetWorld2, mv, 6)) Logf("sky: stretch patch FAILED\n");
+        else Logf("sky: stretched %.2fx upward\n", g_skyStretch);
+    }
+    if (g_cfg.shadowMapSize > 8) {
+        g_shadowSize = (DWORD)ClampInt(g_cfg.shadowMapSize, 8, 4096);
+        BYTE j1[6] = { 0xE9 }, j2[6] = { 0xE9 };
+        DWORD r1 = reinterpret_cast<DWORD>(&ShadowTexStub) - (hot::shadowTexMake + 5); memcpy(j1 + 1, &r1, 4); j1[5] = 0x90;
+        DWORD r2 = reinterpret_cast<DWORD>(&ShadowDepthStub) - (hot::shadowDepthMake + 5); memcpy(j2 + 1, &r2, 4); j2[5] = 0x90;
+        BYTE fld[6] = { 0xD9, 0x05 }; DWORD fa = reinterpret_cast<DWORD>(&g_shadowSizeF); memcpy(fld + 2, &fa, 4);
+        if (!PatchBytes(hot::shadowTexMake, j1, 6) || !PatchBytes(hot::shadowDepthMake, j2, 6) ||
+            !PatchBytes(hot::shadowSizeParam, fld, 6)) Logf("shadows: patch FAILED\n");
+        else Logf("shadows: sun shadow map %ux%u (game: 8x8)\n", g_shadowSize, g_shadowSize);
+    }
+    if (g_cfg.shadowRange > 0.0f && g_cfg.shadowRange != 64.0f) {
+        g_shadowDepth = g_cfg.shadowRange;
+        g_shadowFadeW = g_cfg.shadowFade > 0.0f ? g_cfg.shadowFade : 16.0f;
+        if (g_shadowFadeW > g_shadowDepth * 0.5f) g_shadowFadeW = g_shadowDepth * 0.5f;
+        g_shadowWide = g_shadowDepth * 2.0f;
+        if (!PatchBytes(hot::shadowDepthK, &g_shadowDepth, 4) || !PatchBytes(hot::shadowFadeK, &g_shadowFadeW, 4) ||
+            !PatchBytes(hot::shadowWideK, &g_shadowWide, 4)) Logf("shadows: range patch FAILED\n");
+        else Logf("shadows: reach %.0f units, fading over the last %.0f (game: 64, 16)\n", g_shadowDepth, g_shadowFadeW);
+    }
+    if (g_cfg.glassSort) {
+        BYTE j[6] = { 0xE9 }; DWORD rel = reinterpret_cast<DWORD>(&AlphaSortStub) - (hot::alphaSort + 5);
+        memcpy(j + 1, &rel, 4); j[5] = 0x90;
+        BYTE j1[5] = { 0xE9 }, j2[5] = { 0xE9 };
+        DWORD r1 = reinterpret_cast<DWORD>(&MeshSortStub1) - (hot::alphaSortEnd + 5); memcpy(j1 + 1, &r1, 4);
+        DWORD r2 = reinterpret_cast<DWORD>(&MeshSortStub2) - (hot::meshSort2 + 5); memcpy(j2 + 1, &r2, 4);
+        if (!PatchBytes(hot::alphaSort, j, 6) || !PatchBytes(hot::alphaSortEnd, j1, 5) || !PatchBytes(hot::meshSort2, j2, 5))
+            Logf("glass: sort patch FAILED\n");
+        else Logf("glass: see-through draws sorted back to front\n");
+    }
+    if (g_cfg.glassNoZWrite) {
+        if (!PatchCall(hot::callBlendMode, reinterpret_cast<void*>(&HkBlendMode), 5)) Logf("glass: depth patch FAILED\n");
+        else Logf("glass: blended draws don't write depth\n");
+    }
+    if (g_cfg.shadowFit) {
+        g_shadowBackOff = g_cfg.shadowBackOff > 1.0f ? g_cfg.shadowBackOff : 1000.0f;
+        g_shadowFar = g_cfg.shadowFar > g_shadowBackOff ? g_cfg.shadowFar : g_shadowBackOff * 2.0f;
+        float need = g_shadowBackOff + (g_cfg.shadowRange > 64.0f ? g_cfg.shadowRange : 64.0f);   // (the light must see the whole box)
+        if (g_shadowFar < need) g_shadowFar = need;
+        g_shadowFadeOut = g_shadowFadeW;                        // (the fade the shadow box got: 16 if its reach is the game's)
+        DWORD a1 = reinterpret_cast<DWORD>(&g_shadowBackOff), a2 = reinterpret_cast<DWORD>(&g_shadowFar),
+              a3 = reinterpret_cast<DWORD>(&g_shadowFadeOut);
+        if (!PatchBytes(hot::shadowBackOffLd + 2, &a1, 4) || !PatchBytes(hot::shadowFarLd + 2, &a2, 4) ||
+            !PatchBytes(hot::shadowFadeLd + 2, &a3, 4)) Logf("shadows: depth range patch FAILED\n");
+        else Logf("shadows: light backs off %.0f toward the sun, sees %.0f deep (game: 16, 64)\n", g_shadowBackOff, g_shadowFar);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tuning. The game's data (car physics, cameras, effects...) is in scripts:
 // keywords followed by numbers, read with Script::ReadFloat / ReadInt (0x5C6B70,
 // 0x5C6B90; about 1,800 call sites). Both are replaced: every number is logged
-// with its keyword and file (tuningLog=1), and HWBTMod_tuning.txt can set or
+// with its keyword and file (tuningLog=1), and BTOverdrive_tuning.txt can set or
 // scale it before the game gets it:
 //     KEY = 2.5          set (every KEY, in every file)
 //     KEY *= 1.3         scale
@@ -3114,7 +3805,8 @@ static bool IsNumberTok(const char* s) {
     return e != s && *e == 0;
 }
 static void LoadTuning() {
-    char path[MAX_PATH]; snprintf(path, sizeof(path), "%sHWBTMod_tuning.txt", g_asiDir);
+    CarryOver(MOD_FILE "_tuning.txt", "HWBTMod_tuning.txt");
+    char path[MAX_PATH]; snprintf(path, sizeof(path), "%s" MOD_FILE "_tuning.txt", g_asiDir);
     FILE* f = fopen(path, "r");
     if (!f) return;
     char line[256];
@@ -3216,12 +3908,12 @@ static int __attribute__((thiscall)) HkReadInt(BYTE* scr, char* ok) {
 static void InstallTuning() {
     LoadTuning();
     if (g_cfg.tuningLog) {
-        char path[MAX_PATH]; snprintf(path, sizeof(path), "%sHWBTMod_tuning.log", g_asiDir);
+        char path[MAX_PATH]; snprintf(path, sizeof(path), "%s" MOD_FILE "_tuning.log", g_asiDir);
         if ((g_tlog = fopen(path, "w"))) {
             setvbuf(g_tlog, nullptr, _IOFBF, 1 << 16);
-            fprintf(g_tlog, "HWBTMod v" HWBT_VERSION ": every number the game's scripts read, as it reads them.\n"
+            fprintf(g_tlog, MOD_NAME " v" HWBT_VERSION ": every number the game's scripts read, as it reads them.\n"
                             "file, keyword (#n = the n-th number after it), value as written, -> value used if\n"
-                            "HWBTMod_tuning.txt changed it, @ the game code reading it. HWBTMod_tuning.txt lines:\n"
+                            "BTOverdrive_tuning.txt changed it, @ the game code reading it. BTOverdrive_tuning.txt lines:\n"
                             "  KEY = 2.5    KEY *= 1.3    KEY#1 *= 1.3    file.ext:KEY = 2    @5F9FCF:MASS *= 0.8\n\n");
         }
     }
@@ -3230,6 +3922,69 @@ static void InstallTuning() {
     if (!PatchJmp(hot::scrReadFloat, reinterpret_cast<DWORD>(&HkReadFloat)) ||
         !PatchJmp(hot::scrReadInt, reinterpret_cast<DWORD>(&HkReadInt)))
         Logf("tuning: patch FAILED\n");
+}
+
+// ---------------------------------------------------------------------------
+// Crash log: an access violation (or another fatal CPU exception) in HOT.exe's
+// or this ASI's code is written to the log - where (with its offset), the
+// registers, and the code addresses found on the stack - before the game's own
+// handling. Each place is logged once (the game may catch some itself), 8 at most.
+// ---------------------------------------------------------------------------
+static BYTE* g_modBase; static DWORD g_modSize;
+static void CrashWhere(char* out, size_t n, DWORD a) {
+    if (a >= 0x401000 && a < 0x900000) snprintf(out, n, "HOT.exe %06lX", a);
+    else if (a >= reinterpret_cast<DWORD>(g_modBase) && a < reinterpret_cast<DWORD>(g_modBase) + g_modSize)
+        snprintf(out, n, MOD_FILE ".asi +%05lX", a - reinterpret_cast<DWORD>(g_modBase));
+    else snprintf(out, n, "%08lX", a);
+}
+static bool CrashOurs(DWORD a) {                               // in HOT.exe or this ASI
+    return (a >= 0x401000 && a < 0x900000) ||
+           (a >= reinterpret_cast<DWORD>(g_modBase) && a < reinterpret_cast<DWORD>(g_modBase) + g_modSize);
+}
+static LONG CALLBACK CrashHandler(EXCEPTION_POINTERS* ep) {
+    DWORD code = ep->ExceptionRecord->ExceptionCode;
+    if (code != EXCEPTION_ACCESS_VIOLATION && code != EXCEPTION_ILLEGAL_INSTRUCTION && code != EXCEPTION_INT_DIVIDE_BY_ZERO &&
+        code != EXCEPTION_PRIV_INSTRUCTION && code != EXCEPTION_STACK_OVERFLOW) return EXCEPTION_CONTINUE_SEARCH;
+    DWORD eip = ep->ContextRecord->Eip;
+    // Only faults in the game's or the mod's own code: IsBadReadPtr and co. (used
+    // here and there to probe pointers) fault inside Windows on purpose and
+    // catch it themselves - those aren't crashes. (A crash inside a driver or
+    // Windows itself isn't logged either.)
+    if (!CrashOurs(eip)) return EXCEPTION_CONTINUE_SEARCH;
+    static DWORD seen[8]; static LONG nSeen = 0;
+    for (LONG i = 0; i < nSeen && i < 8; i++) if (seen[i] == eip) return EXCEPTION_CONTINUE_SEARCH;
+    LONG i = InterlockedIncrement(&nSeen) - 1;
+    if (i >= 8) return EXCEPTION_CONTINUE_SEARCH;
+    seen[i] = eip;
+    const CONTEXT* c = ep->ContextRecord;
+    char buf[1024]; size_t n = 0; char where[64];
+    auto add = [&](const char* fmt, auto... a) {                // (one Logf for the whole record: one line block, one timestamp)
+        if (n < sizeof(buf)) { int k = snprintf(buf + n, sizeof(buf) - n, fmt, a...); if (k > 0) n += (size_t)k; }
+    };
+    CrashWhere(where, sizeof(where), eip);
+    add("CRASH: exception %08lX at %s", code, where);
+    if (code == EXCEPTION_ACCESS_VIOLATION && ep->ExceptionRecord->NumberParameters >= 2)
+        add(" (%s %08lX)", ep->ExceptionRecord->ExceptionInformation[0] ? "writing" : "reading",
+            static_cast<DWORD>(ep->ExceptionRecord->ExceptionInformation[1]));
+    add("\n  eax %08lX ebx %08lX ecx %08lX edx %08lX esi %08lX edi %08lX ebp %08lX esp %08lX\n  stack:",
+        c->Eax, c->Ebx, c->Ecx, c->Edx, c->Esi, c->Edi, c->Ebp, c->Esp);
+    const DWORD* sp = reinterpret_cast<const DWORD*>(c->Esp); int found = 0;
+    MEMORY_BASIC_INFORMATION mbi;                               // (the stack's committed part: no probing faults)
+    DWORD top = VirtualQuery(sp, &mbi, sizeof(mbi)) ? reinterpret_cast<DWORD>(mbi.BaseAddress) + mbi.RegionSize : c->Esp;
+    for (int k = 0; k < 256 && found < 12; k++) {
+        if (reinterpret_cast<DWORD>(sp + k) + 4 > top) break;
+        DWORD v = sp[k];
+        if (!CrashOurs(v) || (v >= 0x880000 && v < 0x900000)) continue;   // (code only: not HOT.exe's data)
+        CrashWhere(where, sizeof(where), v); add(" [%d] %s", k, where); found++;
+    }
+    Logf("%s\n", buf);
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+static void InstallCrashLog(HMODULE self) {
+    g_modBase = reinterpret_cast<BYTE*>(self);
+    const IMAGE_NT_HEADERS* nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(g_modBase + reinterpret_cast<const IMAGE_DOS_HEADER*>(g_modBase)->e_lfanew);
+    g_modSize = nt->OptionalHeader.SizeOfImage;
+    AddVectoredExceptionHandler(1, CrashHandler);
 }
 
 // ---------------------------------------------------------------------------
@@ -3242,10 +3997,11 @@ BOOL APIENTRY DllMain(HMODULE h, DWORD reason, LPVOID reserved) {
         InitDirs();
         LoadConfig();
         if (g_cfg.logToFile) {
-            char path[MAX_PATH]; snprintf(path, sizeof(path), "%sHWBTMod.log", g_asiDir);
+            char path[MAX_PATH]; snprintf(path, sizeof(path), "%s" MOD_FILE ".log", g_asiDir);
             g_log = fopen(path, "w");
         }
-        Logf("HWBTMod v" HWBT_VERSION " (based on " HWBT_BASE ") | exe folder %s | root %s\n", g_gameDir, g_rootDir);
+        Logf(MOD_NAME " v" HWBT_VERSION " (based on " HWBT_BASE ") | exe folder %s | root %s\n", g_gameDir, g_rootDir);
+        InstallCrashLog(h);
         g_knownExe = CheckExe();
         if (g_knownExe) {
             InstallSaveFolder();
@@ -3253,6 +4009,11 @@ BOOL APIENTRY DllMain(HMODULE h, DWORD reason, LPVOID reserved) {
             InstallFrameRate();
             InstallSpeedBlur();
             InstallSparks();
+            InstallRendering();
+            InstallScrapeSound();
+            InstallMusicAtGo();
+            InstallMenuFixes();
+            InstallPerf();
             InstallRaceMusic();
             InstallGameLog();
             InstallCloseExits();
