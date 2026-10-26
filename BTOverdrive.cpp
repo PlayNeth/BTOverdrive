@@ -57,7 +57,7 @@
 
 #define MOD_NAME "Beat That! Overdrive"
 #define MOD_FILE "BTOverdrive"                   // .asi, .ini, logs, tuning file
-#define HWBT_VERSION "0.5.3-test6"
+#define HWBT_VERSION "0.5.3-test7"
 #define HWBT_BASE "HWBTFix 0.3.8"
 
 // ---------------------------------------------------------------------------
@@ -144,6 +144,8 @@ namespace hot {
     const DWORD callBlastHit   = 0x4A38F0;   // call 0x457C70 in an explosion's update (0x4A3610): each car in its reach, a hit of kind 1
                                              //   (a small push, 0x456290); here esi = the car, edi = the explosion (+0x2C centre, +0x10 reach squared)
     const DWORD fnTakeHit      = 0x457C70;
+    const DWORD vtSteerSetup   = 0x8C8F94;   // RaceCarSteering's vtable (0x8C8F3C) +0x58: its setup (0x6C6D30, thiscall): +0x74 how fast
+                                             //   the wheels turn (0.96 rad/s, 0x8C8FC0), +0x78 the lock (+0x7C: 1.13 rad at most)
     const DWORD fnBlastMake    = 0x4A3950;   // set off an explosion (thiscall: the explosion object, its centre, ...)
     const DWORD callBlastMake[6] = { 0x470B38, 0x4731E2, 0x49D352, 0x49EAA0, 0x4A1128, 0x4A1FE3 };
                                              //   by: a mortar shell, a rocket (plain, bottle, airstrike), a homing rocket,
@@ -334,6 +336,8 @@ namespace hot {
         { 0x49EAA0,       "\xE8\xAB\x4E\x00\x00", 5 },
         { 0x4A1128,       "\xE8\x23\x28\x00\x00", 5 },
         { 0x4A1FE3,       "\xE8\x68\x19\x00\x00", 5 },
+        { vtSteerSetup,   "\x30\x6D\x6C\x00", 4 },                // -> 0x6C6D30
+        { 0x6C6E12,       "\xD9\x05\xC0\x8F\x8C\x00\xD9\x5E\x74", 9 },   // fld [0x8C8FC0] / fstp [esi+0x74]
         { fnTakeHit,      "\x83\xEC\x0C\x53\x8B\xD9\x80\xBB\xD4\x12\x00\x00\x00", 13 },
         { fnStuntStart,   "\x51\x53\x8B\x5C\x24\x0C\x56\x57\x8B\xF1\x33\xFF", 12 },
         { 0x4BAF1F,       "\x80\xBE\x8C\x03\x00\x00\x00", 7 },   // cmp byte [esi+0x38C],0: the roll's push and torque skipped when quiet
@@ -506,6 +510,7 @@ struct Config {
     float hazardSpin = 6.0f;             // and a tumble (radians/s)
     float hazardFlyTime = 3.0f;          // a thrown car goes through walls for this long (seconds; 0 = never)
     int   hazardSmoke = 1;               // a burst of smoke on a car the hazard throws
+    float steerRate = 2.5f;              // how fast the front wheels turn when you steer: x the game's (0.96 rad/s - over a second to full lock)
     int   fallReset = 1;                 // any race car that falls off the track into the void is put back where it left it
     float hazardFallReset = 25.0f;       // a thrown car this far below where it was hit is put back on the track (0 = never)
     float hazardPushTime = 0.5f;         // the throw keeps pushing for this long (seconds)
@@ -689,6 +694,11 @@ static const char kIniText[] =
     "; the graveyard gate's panels: 1 = their collision made 3 units thick, so cars can't slip through\n"
     ";   as they swing shut; 0 = as the game has them\n"
     "hazardGateFix=1\n"
+    "; --- handling ---\n"
+    "; how fast the front wheels turn when you steer, x the game's: the game turns them at 0.96 rad/s,\n"
+    ";   over a second from straight to full lock - the heavy, slow turn-in. The car's mass and inertia\n"
+    ";   (BTOverdrive_tuning.txt) hardly change that. 1 = the game's\n"
+    "steerRate=2.5\n"
     "; --- falling off ---\n"
     "; on every track, a race car (yours or the AI's) that falls off into the void is put back on the\n"
     ";   track where it left it, with the game's own put-back - the game's never found it a place from\n"
@@ -1009,6 +1019,7 @@ static void LoadConfig() {
         else if (!_stricmp(key, "hazardGateFix"))      g_cfg.hazardGateFix = n;
         else if (!_stricmp(key, "hazardFallReset"))    g_cfg.hazardFallReset = (float)atof(val);
         else if (!_stricmp(key, "fallReset"))          g_cfg.fallReset = n;
+        else if (!_stricmp(key, "steerRate"))          { float v = (float)atof(val); g_cfg.steerRate = v < 0.1f ? 0.1f : v > 10.0f ? 10.0f : v; }
     }
     fclose(f);
 }
@@ -3308,6 +3319,41 @@ static void HazardReport() {                                    // at quitting: 
         if (b.box && b.maxSpeed > 0.5f)
             Logf("hazards: box %p: fastest %.1f units/s, %ld hit(s)\n", b.box, b.maxSpeed, b.hits);
 }
+// Steering (steerRate). A race car's steering (RaceCarSteering, 0x6C76B0) turns
+// its front wheels toward where the stick points at +0x74 rad/s at most (more at
+// speed), which its setup (0x6C6D30) sets to 0.96 rad/s for every car - over a
+// second from straight to the 1.13 rad lock. That's the slow, heavy turn-in; the
+// car's mass and inertia barely touch it. The setup is wrapped (its vtable slot)
+// and the rate scaled; a setup that leaves the rate as it was (the game's other
+// modes) isn't scaled twice.
+typedef void (__attribute__((thiscall)) *SteerSetup_t)(BYTE*);
+static SteerSetup_t g_steerSetup = nullptr;
+struct SteerSeen { BYTE* obj; float set; };
+static SteerSeen g_steerSeen[32];
+static int g_steerSeenNext = 0;
+static LONG g_steerLogged = 0;
+static void __attribute__((thiscall)) HkSteerSetup(BYTE* st) {
+    g_steerSetup(st);
+    float* rate = reinterpret_cast<float*>(st + 0x74);
+    SteerSeen* e = nullptr;
+    for (SteerSeen& x : g_steerSeen) if (x.obj == st) { e = &x; break; }
+    if (e && *rate == e->set) return;                           // (ours already)
+    float was = *rate;
+    *rate = was * g_cfg.steerRate;
+    if (!e) { e = &g_steerSeen[g_steerSeenNext]; g_steerSeenNext = (g_steerSeenNext + 1) & 31; e->obj = st; }
+    e->set = *rate;
+    if (InterlockedIncrement(&g_steerLogged) <= 8)
+        Logf("steering: %p turns its wheels at %.2f rad/s (game: %.2f), lock %.2f rad\n", st, *rate, was,
+             *reinterpret_cast<float*>(st + 0x78));
+}
+static void InstallSteering() {
+    if (g_cfg.steerRate == 1.0f) { Logf("steering: the game's\n"); return; }
+    g_steerSetup = *reinterpret_cast<SteerSetup_t*>(hot::vtSteerSetup);
+    if (!PatchPointer(reinterpret_cast<void**>(hot::vtSteerSetup), reinterpret_cast<void*>(&HkSteerSetup))) {
+        Logf("steering: patch FAILED\n"); return;
+    }
+    Logf("steering: wheels turn x%.2f as fast\n", g_cfg.steerRate);
+}
 static void InstallHazards() {
     if (!g_cfg.hazardHits) { Logf("hazards: original (hazardHits=0)\n"); return; }
     if (!InstallCarSync() ||
@@ -4832,7 +4878,7 @@ static void LoadTuning() {
     CarryOver(MOD_FILE "_tuning.txt", "HWBTMod_tuning.txt");
     char path[MAX_PATH]; snprintf(path, sizeof(path), "%s" MOD_FILE "_tuning.txt", g_asiDir);
     FILE* f = fopen(path, "r");
-    if (!f) return;
+    if (!f) { Logf("tuning: no %s - the game's numbers as they are\n", path); return; }
     char line[256];
     while (fgets(line, sizeof(line), f) && g_tovN < 512) {
         if (char* c = strpbrk(line, ";#\r\n")) {
@@ -5078,6 +5124,7 @@ BOOL APIENTRY DllMain(HMODULE h, DWORD reason, LPVOID reserved) {
             InstallHazards();
             InstallWeaponImpact();
             InstallFallReset();
+            InstallSteering();
             InstallGrid();
             InstallStartBoost();
             InstallAI();
