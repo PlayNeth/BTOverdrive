@@ -57,7 +57,7 @@
 
 #define MOD_NAME "Beat That! Overdrive"
 #define MOD_FILE "BTOverdrive"                   // .asi, .ini, logs, tuning file
-#define HWBT_VERSION "0.5.3-test22"
+#define HWBT_VERSION "0.5.3-test24"
 #define HWBT_BASE "HWBTFix 0.3.8"
 
 // ---------------------------------------------------------------------------
@@ -538,6 +538,7 @@ struct Config {
     int   hazardSmoke = 1;               // a burst of smoke on a car the hazard throws
     float steerRate = 2.5f;              // how fast the front wheels turn when you steer: x the game's (0.96 rad/s - over a second to full lock)
     float carShadowDepth = 1.9f;         // how far below a car's middle its shadow reaches (game: 4.4 - through to a road below)
+    float blueEmp = 0.3f;                // a blue crate's super EMP: only for the last two, and kept this often (else rolled again)
     int   itemOdds = 1;                  // what a crate gives by race position (itemsFirst/Front/Mid/Back); 0 = the game's table
     int   aiUnstuck = 1;
     float aiLoopSpeed = 50.0f;           // an AI car on a loop's wall or ceiling keeps at least this speed (units/s; 0 = off)
@@ -547,8 +548,9 @@ struct Config {
     float megaShieldTime = 1.75f;
     int   shieldZap = 1;                 // a car touching a shield is slowed (the parachute's slow) for shieldSlow s; a mega shield's also loses its steering
     float shieldSlow = 2.0f;
+    float shieldTouch = 5.5f;            //   a touch: the cars' centres closer than this (and inside the shield)
     float shieldLock = 2.0f;             //   for this long
-    float empSlow = 2.5f;                // the EMP also slows every other car (as the tesla ray does) for this long (s; 0 = no)
+    float empSlow = 3.0f;                // the EMP also slows every other car (as the tesla ray does) for this long (s; 0 = no)
     int   iceFix = 1;                    // the ice gun: no freezing a frozen car again, a moment free after breaking out, the AI frozen too
     int   physLog = 1;                   // (test builds) your car's physics on loops and waves to BTOverdrive_physics.csv                 // an AI car that's been driving for 6 s without getting anywhere is put back on the track
     int   fallReset = 1;                 // any race car that falls off the track into the void is put back where it left it
@@ -774,7 +776,10 @@ static const char kIniText[] =
     "itemsFirst=smoke:30, shield:30, mine:25, rocket:15\n"
     "itemsFront=rocket:25, mine:15, shield:15, mortar:12, parachute:10, icegun:10, boost:8, tesla:5\n"
     "itemsMid=rocket:18, mortar:15, parachute:15, icegun:12, boost:12, tesla:10, airstrike:8, mine:5, smoke:5\n"
-    "itemsBack=tesla:22, airstrike:20, boost:18, parachute:12, mortar:10, icegun:10, emp:4\n"
+    "itemsBack=tesla:22, airstrike:20, boost:18, parachute:12, mortar:10, icegun:10, emp:2\n"
+    "; a blue crate's super EMP: only the last two places can get it, and only this share of the times\n"
+    ";   the game's roll gives it (the rest are rolled again) - 1 = as often as the game, 0 = never\n"
+    "blueEmp=0.3\n"
     "; the ice gun: a frozen car isn't frozen again on top (each shot restarted it), a car that's just\n"
     ";   broken out is free for a second, its steering always comes back with the ice, and a frozen AI\n"
     ";   car can't steer either (it drove on as if nothing happened) - 0 = as the game\n"
@@ -791,8 +796,11 @@ static const char kIniText[] =
     "shieldZap=1\n"
     "shieldSlow=2\n"
     "shieldLock=2\n"
+    "; how close (centre to centre, units) a car has to come to count as touching the shield (cars are\n"
+    ";   about 2 wide, 4-5 long)\n"
+    "shieldTouch=5.5\n"
     "; the EMP also slows every other car down (as the tesla ray does) for this many seconds (0 = no)\n"
-    "empSlow=2.5\n"
+    "empSlow=3\n"
     "; --- weapon hits ---\n"
     "; weapon hits throw the car instead of the game's roll on the spot. A mine, airstrike bomb or\n"
     ";   parachute bomb throws it weaponPush units/s away from the blast and weaponLift up, tumbling\n"
@@ -1141,6 +1149,7 @@ static void LoadConfig() {
         else if (!_stricmp(key, "aiUnstuck"))          g_cfg.aiUnstuck = n;
         else if (!_stricmp(key, "itemOdds"))           g_cfg.itemOdds = n;
         else if (!_stricmp(key, "aiLoopSpeed"))        g_cfg.aiLoopSpeed = (float)atof(val);
+        else if (!_stricmp(key, "blueEmp"))            g_cfg.blueEmp = (float)atof(val);
         else if (!_stricmp(key, "iceFix"))             g_cfg.iceFix = n;
         else if (!_stricmp(key, "smokeHide"))          g_cfg.smokeHide = n;
         else if (!_stricmp(key, "parachuteHoming"))    g_cfg.parachuteHoming = n;
@@ -1149,6 +1158,7 @@ static void LoadConfig() {
         else if (!_stricmp(key, "shieldZap"))          g_cfg.shieldZap = n;
         else if (!_stricmp(key, "shieldSlow"))         g_cfg.shieldSlow = (float)atof(val);
         else if (!_stricmp(key, "shieldLock"))         g_cfg.shieldLock = (float)atof(val);
+        else if (!_stricmp(key, "shieldTouch"))        g_cfg.shieldTouch = (float)atof(val);
         else if (!_stricmp(key, "empSlow"))            g_cfg.empSlow = (float)atof(val);
         else if (!_stricmp(key, "physLog"))            g_cfg.physLog = n;
         else if (!_stricmp(key, "carShadowDepth"))     g_cfg.carShadowDepth = (float)atof(val);
@@ -3611,6 +3621,8 @@ static void __attribute__((thiscall)) HkParaLaunch(BYTE* ammo, DWORD a, DWORD b)
     ammo[0x1F6] = 1;                                            // homing
     ammo[0x1F7] = 1;                                            // steered
     reinterpret_cast<Launch_t>(0x4710D0)(ammo, a, b);
+    BYTE* by = *reinterpret_cast<BYTE**>(ammo + 0x44);
+    if (by) ITEMLOG("parachute: launched by car %p%s, %s\n", by, CarTag(by), ammo[0x1F6] ? "homing" : "aimed at a car ahead (an AI's: no homing, as its homing rockets)");
 }
 // shields
 typedef void (__attribute__((thiscall)) *ShieldOn_t)(BYTE*, float, float, int, int, int);
@@ -3618,7 +3630,7 @@ static void __attribute__((thiscall)) HkShieldOn(BYTE* sh, float secs, float rad
     float k = (mega & 0xFF) ? g_cfg.megaShieldTime : g_cfg.shieldTime;
     if (k <= 0.0f) k = 1.0f;
     BYTE* car = sh - 0x12B0;
-    ITEMLOG("shield: car %p%s %s shield up for %.1f s (the game's %.1f)\n", car, CarTag(car), (mega & 0xFF) ? "mega" : "plain", secs * k, secs);
+    ITEMLOG("shield: car %p%s %s shield up for %.1f s (the game's %.1f), reach %.1f\n", car, CarTag(car), (mega & 0xFF) ? "mega" : "plain", secs * k, secs, radius);
     reinterpret_cast<ShieldOn_t>(0x4A7D20)(sh, secs * k, radius, mega, hits, one);
 }
 struct Shock { int fx; DWORD endMs; };
@@ -3643,7 +3655,8 @@ static void ShockEnds(DWORD now) {
 static void ItemFxStep(BYTE* car, IceSeen*, DWORD now) {        // from IceTrack, once per car per step
     ShockEnds(now);
     if (!g_cfg.shieldZap || !car[0x12D4]) return;               // (no shield up)
-    float radius = *reinterpret_cast<const float*>(car + 0x12D8) + 1.0f;
+    float radius = *reinterpret_cast<const float*>(car + 0x12D8) + 1.0f;   // (the shield's own reach, 0x4A7D20's +0x28)
+    if (radius > g_cfg.shieldTouch) radius = g_cfg.shieldTouch;
     bool mega = car[0x12E0] != 0;
     const float* p = reinterpret_cast<const float*>(car + 0x40);
     for (int i = 0; i < 8; i++) {
@@ -3750,7 +3763,7 @@ static void ItemDefaults() {                                    // (the ini's de
         "smoke:30, shield:30, mine:25, rocket:15",
         "rocket:25, mine:15, shield:15, mortar:12, parachute:10, icegun:10, boost:8, tesla:5",
         "rocket:18, mortar:15, parachute:15, icegun:12, boost:12, tesla:10, airstrike:8, mine:5, smoke:5",
-        "tesla:22, airstrike:20, boost:18, parachute:12, mortar:10, icegun:10, emp:4" };
+        "tesla:22, airstrike:20, boost:18, parachute:12, mortar:10, icegun:10, emp:2" };
     static const char* const names[4] = { "First", "Front", "Mid", "Back" };
     for (int g = 0; g < 4; g++) if (!g_itemsSet[g]) ItemTableParse(names[g], def[g]);
 }
@@ -3759,6 +3772,25 @@ static LONG g_itemLogged = 0;
 typedef int (__attribute__((thiscall)) *WeaponRoll_t)(BYTE*, int, int, float, int);
 static int __attribute__((thiscall)) HkWeaponRoll(BYTE* table, int pos, int cars, float roll, int blue) {
     WeaponRoll_t orig = reinterpret_cast<WeaponRoll_t>(0x4C3360);
+    if (blue == 1 && cars >= 1 && pos >= 1) {                  // a blue crate: the game's roll, the EMP held back
+        int id = orig(table, pos, cars, roll, blue);
+        if (id != 0xFB2 && id != 0xFA6) return id;
+        bool back = cars >= 4 ? pos >= cars - 1 : pos == cars;
+        g_itemRand = g_itemRand * 1664525u + 1013904223u;
+        if (back && (g_itemRand >> 8) / 16777216.0f < g_cfg.blueEmp) {
+            if (InterlockedIncrement(&g_itemLogged) <= 40) Logf("items: position %d of %d got a blue crate's EMP\n", pos, cars);
+            return id;
+        }
+        int was = id;
+        for (int i = 0; i < 12 && (id == 0xFB2 || id == 0xFA6); i++) {
+            g_itemRand = g_itemRand * 1664525u + 1013904223u;
+            id = orig(table, pos, cars, (g_itemRand >> 8) / 16777216.0f * 100.0f, blue);
+        }
+        if (id == 0xFB2 || id == 0xFA6) id = was == 0xFB2 ? 0xFAD : 0xFA1;   // (still: a homing rocket)
+        if (InterlockedIncrement(&g_itemLogged) <= 40)
+            Logf("items: position %d of %d: a blue crate's EMP held back, item %X instead\n", pos, cars, id);
+        return id;
+    }
     if (blue == 1 || cars < 1 || pos < 1) return orig(table, pos, cars, roll, blue);
     int g;
     if (pos == 1) g = 0;
