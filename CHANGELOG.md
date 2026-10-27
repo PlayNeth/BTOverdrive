@@ -8,6 +8,55 @@ The plugin checks the exe's bytes at every place it patches. If anything differs
 
 ---
 
+## 0.5.3: weapons that hit hard, items by position, polish
+
+**Weapon hits**
+- **Real impact instead of the canned barrel roll:** a hit throws the car, and every throw varies a little.
+  - Mines, airstrike bombs and parachute bombs throw it away from the blast and up, tumbling over and spinning.
+  - Rockets and mortar shells throw it forward and up, flipping end over end. That's a crash landing, not a free boost. A mortar shell hits 1.4× as hard as a rocket.
+  - A car caught in a blast without a direct hit is thrown too, at 40–100% strength depending on how close it was. In the game it only got a nudge.
+- **Invisible walls:** a thrown car passes through the track's invisible walls for 2 s, as the ghoul's throws do, but not through real walls.
+- **Back on the track:** a car thrown off the track is put back.
+- `weaponImpact=0` gives back the game's roll. Needs `hazardHits=1`.
+
+**Items**
+- **Items by race position, Mario Kart style:** the leader gets defensive items and the back of the pack gets the big weapons. The odds are in four INI lines (`itemsFirst`, `itemsFront`, `itemsMid`, `itemsBack`) of `item:weight` pairs.
+- **EMP:**
+  - Only the last two places can get it, at low odds, from normal or blue crates. A blue crate keeps the game's odds for everything else.
+  - It now also slows every other car down for 3 s, like a Tesla Ray hit.
+- **Shields:**
+  - Last 1.5× as long; the Mega Shield lasts 1.75×.
+  - A car that touches a shield gets a shock: the Tesla Ray's sparks, and slowed to parachute speed for 2 s. A Mega Shield's shock also takes its steering away for 2 s.
+- **Parachute:** homes in on its target like the Homing Rocket. An AI's parachute is aimed at a car ahead, as the AI's homing rockets are.
+- **Smoke:** while a car's smoke is pouring out, homing rockets and parachutes lose their lock on it.
+- **Ice gun fixes:**
+  - Each shot of the upgraded ice gun started a new freeze on top of the last. A frozen car is no longer refrozen.
+  - A car that has just broken out is free for a second.
+  - The steering always comes back with the ice.
+  - A frozen AI car can no longer steer; it drove on as if nothing had happened.
+- **Spooky Sprint:** a stretch of road before the ghoul's ramp is marked, in the track's data, with the state of the track's shield power-up. That state doesn't allow firing, so nothing could be fired there. Items now fire there, and under the shield power-up too (`shieldPowerFire`).
+
+**Track and AI**
+- **Falling off:** on every track, a car that falls off into the void is put back where it left the track. The game's own reset never found it a place from down there.
+- **Stuck AI:** an AI car that drives for 6 s without getting anywhere is put back at the nearest reset point. That covers an AI that's lost its route, or keeps ramming a shortcut's unbroken barrier.
+- **AI on loops:** the AI slowed down for big loops, fell off the wall or ceiling, and tried again over and over. On a loop it now keeps at least 50 units/s, and one that keeps falling off at the same loop is put back past it.
+- **Narrow starts:** the grid fits the room beside the start line. It's moved into the middle, and gets fewer columns, or narrower ones, where there's no room for four.
+
+**Handling and physics**
+- **Quicker steering:** the game turned the front wheels at 0.96 rad/s, over a second from straight to full lock, which gave the slow, heavy turn-in. They now turn 2.5× as fast (`steerRate`).
+- **Smoother loops and wavy roads:** stiffer suspension damping and slightly softer springs keep the wheels on the road instead of skipping off it.
+- **Built-in tuning:** the tuning file's numbers are now built into the mod: a lighter car, a closer and livelier camera, more tyre smoke and the suspension changes. With no `BTOverdrive_tuning.txt`, the mod uses them and writes the file for you to edit. Delete the file to get the built-in numbers back. **Upgrading:** delete the `BTOverdrive_tuning.txt` from an earlier version, which doesn't have the suspension lines.
+
+**Graphics and sound**
+- **Car shadows:** a car's shadow reached 4.4 units below it, through the road onto any road underneath. On the spiral, cars above you cast shadows on your road. It now reaches 1.9 (`carShadowDepth`).
+- **Sparks:** collision sparks move with the car and burst off the contact, back along the wall and out from the car, and they're short-lived. The game shot them backward at a fifth of the car's speed, so at speed they all streamed straight off the screen.
+- **Menu music loops:** the main menu's and garage's songs played once and then went silent for good. Every song now starts over at its end.
+- **Engine blips:** a wheel off the road for a moment, over a bump or a crest, revved the engine for a few hundredths of a second, giving a high-pitched blip. A held sound's pitch now rises at most 6% per 1/60 s. Drops in pitch are left as the game sets them (`soundPitchRise`).
+- **Doppler:** the listener's speed is measured the same way as each sound's, so your own engine has no Doppler shift of its own.
+- **Intro camera:** the race intro's camera is pulled in toward the car when the scenery is in the way.
+
+**New INI keys:** see the table.
+
 ## 0.5.2: EAX, sound polish, faster race loading
 
 **EAX (with a wrapper such as DSOAL)**
@@ -276,6 +325,30 @@ HWBTFix 0.3.8's keys, plus the mod's own:
 | `fastLoad` | `1` | Faster race loading: the drivers' models load as fast as frames allow; file reads polled every 1 ms [10]. |
 | `scrapeSound` | `1` | The game's metalscrape sound when grinding walls and cars. |
 | `sparkImpactRef` / `sparkImpactMax` / `sparkTwist` | `3800` / `1.6` / `25` | Hit strength for normal-size sparks (`0` = all the same); the biggest hits' size ×; degrees each spark turns off its course. |
+| `weaponImpact` | `1` | A weapon hit throws the car instead of the game's barrel roll (needs `hazardHits=1`). |
+| `weaponPush` / `weaponLift` / `weaponTumble` | `40` / `55` / `4` | Mines and bombs: away from the blast and up (units/s), tumble (radians/s). |
+| `weaponForward` / `weaponForwardLift` / `weaponForwardTumble` | `35` / `45` / `6` | Rockets and mortar shells: forward and up (units/s), end-over-end flip (radians/s). |
+| `weaponMortar` / `weaponSpin` | `1.4` / `3` | A mortar shell × a rocket; spin round (radians/s). |
+| `weaponFlyTime` / `weaponWallMats` | `2` / `12` | A thrown car passes through the invisible walls (these collision material ids) for this long (s). |
+| `itemOdds` | `1` | Items by race position (`0` = the game's table). |
+| `itemsFirst` / `itemsFront` / `itemsMid` / `itemsBack` | see the INI | `item:weight` pairs for 1st, the front third, the middle and the last two. Items: rocket, mortar, boost, icegun, mine, emp, parachute, airstrike, smoke, tesla, shield. |
+| `blueEmp` | `0.5` | A blue crate's EMP: only for the last two, kept this share of the time (else rolled again). |
+| `empSlow` | `3` | The EMP slows every other car for this long (s; `0` = no). |
+| `shieldTime` / `megaShieldTime` | `1.5` / `1.75` | Shield duration × the game's. |
+| `shieldZap` / `shieldSlow` / `shieldLock` / `shieldTouch` | `1` / `2` / `2` / `5.5` | Touching a shield: slowed for this long (s); a Mega Shield's also can't steer this long (s); how close counts as touching (units, centre to centre). |
+| `parachuteHoming` / `smokeHide` | `1` / `1` | The plain parachute homes in; smoke hides its car from homing weapons. |
+| `iceFix` | `1` | Ice gun fixes: no refreezing, a second free after breaking out, frozen AI can't steer. |
+| `shieldPowerFire` | `1` | Items fire under a track's shield power-up (and on Spooky Sprint's marked road). |
+| `fallReset` | `1` | A car that falls off the track is put back. |
+| `aiUnstuck` | `1` | An AI car stuck for 6 s is put back at the nearest reset point. |
+| `aiLoopSpeed` | `50` | An AI car on a loop's wall or ceiling keeps at least this speed (units/s; `0` = off). |
+| `steerRate` | `2.5` | How fast the front wheels turn × the game's. |
+| `carShadowDepth` | `1.9` | How far below a car its shadow reaches (units) [4.4]. |
+| `sparkInherit` / `sparkBurst` / `sparkBurstMin` | `1` / `0.35` / `6` | Collision sparks keep × the car's velocity; burst off the contact at × the sliding speed, at least this (units/s). |
+| `sparkOut` / `sparkLift` / `sparkLife` | `0.6` / `0.4` / `0.6` | The burst: out from the car, up; the sparks' life ×. |
+| `musicLoop` | `1` | Every song starts over at its end. |
+| `soundPitchRise` | `0.06` | A held sound's pitch rises at most this much per 1/60 s (`0` = as the game). |
+| `introCamClip` | `1` | The race intro's camera is kept out of the scenery. |
 
 ## Build
 

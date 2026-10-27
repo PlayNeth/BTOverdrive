@@ -43,7 +43,12 @@
 //    AI, Rampage; speed FOV, blur and shake; sparks; sun shadows, glass, HDR
 //    glare, the sky; animated models interpolated; the scrape sound, race music
 //    at GO; the 2D half-pixel offset and the track select's name; the tuning
-//    log/file, frame timing and a crash log in BTOverdrive.log.
+//    log/file (its defaults built in), frame timing and a crash log in
+//    BTOverdrive.log; weapon hits that throw cars, items by race position and
+//    reworked items (ice gun, smoke, parachute, shields, EMP, firing on Spooky
+//    Sprint), falls and stuck AI put back, the AI on loops, quicker steering,
+//    car shadows that stay on their road, sparks that move with the car,
+//    looping menu music and smoothed engine pitch.
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -57,7 +62,7 @@
 
 #define MOD_NAME "Beat That! Overdrive"
 #define MOD_FILE "BTOverdrive"                   // .asi, .ini, logs, tuning file
-#define HWBT_VERSION "0.5.3-test31"
+#define HWBT_VERSION "0.5.3"
 #define HWBT_BASE "HWBTFix 0.3.8"
 
 // ---------------------------------------------------------------------------
@@ -154,8 +159,6 @@ namespace hot {
     const DWORD vtParaLaunch   = 0x8AAEBC;   // GSAmmoParachute's (0x8AAEA4) +0x18: launch (0x4710D0, thiscall firer, ?)
     const DWORD vtEmpFire      = 0x8AAFB4;   // GSAmmoEMP's (0x8AAFAC) +0x8: set off (0x49EEA0)
     const DWORD vtEmpUpFire    = 0x8AB01C;   // GSAmmoEMPUpgrade's (0x8AB014) +0x8
-    const DWORD callFireMsgA   = 0x41E707;   // call 0x5890F0 (the game's debug print, a no-op): "WEAPON ERROR - INHIBITED BY TOONSTAT - %i"
-    const DWORD callFireMsgB   = 0x41E716;   // call 0x5890F0: no weapon / already firing / bAllowWeaponFire false (the fire button's checks, 0x41E3C0)
     const DWORD callToonCanFire = 0x41E593;  // call 0x451370 (thiscall the car's toon state, car+0xF44): may this state fire? State 4
                                              //   is a track's shield power-up's (GSShieldToonPower_c, 0x4DB110), which says no
     const DWORD callToonCanFire2 = 0x46D22D; // call 0x451370: the same check on the other way an item is set off (0x46D210)
@@ -482,8 +485,6 @@ namespace hot {
         { callIceFull,    "\xE8\x74\xFD\xFF\xFF", 5 },               // call 0x478E40
         { callMslTarget,  "\xE8\x22\xFC\xFF\xFF", 5 },               // call 0x473370
         { callShieldOn,   "\xE8\xC0\xA6\x00\x00", 5 },               // call 0x4A7D20
-        { callFireMsgA,   "\xE8\xE4\xA9\x16\x00", 5 },               // call 0x5890F0
-        { callFireMsgB,   "\xE8\xD5\xA9\x16\x00", 5 },
         { callToonCanFire, "\xE8\xD8\x2D\x03\x00", 5 },              // call 0x451370
         { callToonCanFire2, "\xE8\x3E\x41\xFE\xFF", 5 },             // call 0x451370
         { callToonShowWpn[0], "\xE8\xF1\x22\x02\x00", 5 },           // call 0x451380
@@ -567,7 +568,6 @@ struct Config {
     float shieldLock = 2.0f;             //   for this long
     float empSlow = 3.0f;                // the EMP also slows every other car (as the tesla ray does) for this long (s; 0 = no)
     int   iceFix = 1;                    // the ice gun: no freezing a frozen car again, a moment free after breaking out, the AI frozen too
-    int   physLog = 1;                   // (test builds) your car's physics on loops and waves to BTOverdrive_physics.csv                 // an AI car that's been driving for 6 s without getting anywhere is put back on the track
     int   fallReset = 1;                 // any race car that falls off the track into the void is put back where it left it
     float hazardFallReset = 25.0f;       // a thrown car this far below where it was hit is put back on the track (0 = never)
     float hazardPushTime = 0.5f;         // the throw keeps pushing for this long (seconds)
@@ -1186,7 +1186,6 @@ static void LoadConfig() {
         else if (!_stricmp(key, "shieldLock"))         g_cfg.shieldLock = (float)atof(val);
         else if (!_stricmp(key, "shieldTouch"))        g_cfg.shieldTouch = (float)atof(val);
         else if (!_stricmp(key, "empSlow"))            g_cfg.empSlow = (float)atof(val);
-        else if (!_stricmp(key, "physLog"))            g_cfg.physLog = n;
         else if (!_stricmp(key, "carShadowDepth"))     g_cfg.carShadowDepth = (float)atof(val);
         else if (!_stricmp(key, "steerRate"))          { float v = (float)atof(val); g_cfg.steerRate = v < 0.1f ? 0.1f : v > 10.0f ? 10.0f : v; }
     }
@@ -1533,8 +1532,6 @@ static void NoteHazardCar(BYTE* car);
 static void HazardFallCheck(BYTE* car);
 static bool g_fallOn = false;
 static bool g_aiStuckOn = false;
-static FILE* g_physLog = nullptr;
-static void PhysLogStep(BYTE* car);
 static void AiStuckTrack(BYTE* car);
 static void AiLoopAssist(BYTE* car);
 static void IceTrack(BYTE* car);
@@ -1548,7 +1545,6 @@ extern "C" void __cdecl RegCar(BYTE* car) {          // per car, per step, at th
     if (g_aiStuckOn) AiStuckTrack(car);
     if (g_cfg.aiLoopSpeed > 0.0f) AiLoopAssist(car);
     if (g_carFxOn) IceTrack(car);
-    if (g_physLog) PhysLogStep(car);
     if (!g_interpOn) return;
     if (Track* t = FindTrack(car, 1)) t->seenStep = g_stepsDone + 1;
 }
@@ -3001,7 +2997,6 @@ struct HazardKick {
     float dir[2];                               // the throw's horizontal direction (x, z)
     float push; DWORD pushMs;                   // its speed along dir kept up to push for pushMs
     bool weapon;                                // a weapon hit's: no smoke, walls stay walls
-    bool landLogged; float peakY;               //   (logged: how high, how long - test builds)
 };
 static HazardKick g_kicks[16];
 struct HazardCar { BYTE* car; DWORD ms; };                      // race cars seen at their physics sync
@@ -3028,7 +3023,6 @@ static void ApplyHazardKick(BYTE* car) {
         bool airborne = k.watch && k.flying && now - k.flying < 8000;  // hit again in the air: keep where it was
         if (!airborne) memcpy(k.m0, car + 0x10, sizeof(k.m0));         //   first hit (on the track) for the put-back
         k.flying = now ? now : 1;
-        k.peakY = reinterpret_cast<const float*>(car + 0x10)[13]; k.landLogged = false;
         if (g_cfg.hazardSmoke && !k.weapon)                             // a burst of smoke on the swatted car
             reinterpret_cast<void (__attribute__((thiscall)) *)(BYTE*)>(hot::fnCarDustBall)(car);
         k.watch = g_cfg.hazardFallReset > 0.0f;
@@ -3058,13 +3052,6 @@ static void HazardFallCheck(BYTE* car) {                        // from RegCar
                 float add = k.push - along;
                 float nv[3] = { v[0] + k.dir[0] * add, v[1], v[2] + k.dir[1] * add };
                 reinterpret_cast<SetVec_t>(hot::fnSetLinVel)(car, nv);
-            }
-        }
-        if (k.weapon && !k.landLogged) {                                // (test builds: how high, how long)
-            if (y > k.peakY) k.peakY = y;
-            if (now - k.flying > 200 && vy <= 0.0f && y <= k.m0[13] + 0.5f) {
-                k.landLogged = true;
-                Logf("weapons: car %p came down after %.2f s, %.1f units up at most\n", car, (now - k.flying) / 1000.0f, k.peakY - k.m0[13]);
             }
         }
         if (!k.watch) continue;
@@ -3347,50 +3334,6 @@ static void InstallAiUnstuck() {
     g_aiStuckOn = true;
     Logf("ai: a car stuck for 6 s is put back on the track\n");
 }
-// (diagnostic, test builds: physLog=1) Your car's physics step by step while it
-// isn't level (loops, banks, waves: up tilted over 25 degrees) or its turning
-// jumps, to BTOverdrive_physics.csv: position, up, velocity, spin, wheels on the
-// ground - to find where loops and wavy roads jolt.
-static void PhysLogStep(BYTE* car) {
-    if (*reinterpret_cast<DWORD*>(car) != 0x8A0384) return;     // your car
-    static LONG step = 0, rows = 0; static float lastW[3], lastV[3]; static LONG quietUntil = 0;
-    step++;
-    const float* m = reinterpret_cast<const float*>(car + 0x10);
-    const float* v = reinterpret_cast<const float*>(car + 0x260);
-    const float* w = reinterpret_cast<const float*>(car + 0x26C);
-    int wheels = 0, total = 0;
-    int groups = *reinterpret_cast<const int*>(car + 0x7DC);
-    for (int g = 0; g < groups && g < 8; g++) {
-        const BYTE* grp = reinterpret_cast<BYTE* const*>(car + 0x7E0)[g];
-        if (!grp) continue;
-        for (int k = 0; k < 4; k++) {
-            const BYTE* wh = reinterpret_cast<BYTE* const*>(grp + 0x6C)[k];
-            if (!wh) continue;
-            total++;
-            if (*reinterpret_cast<void* const*>(wh + 0x298)) wheels++;
-        }
-    }
-    float dw[3] = { w[0] - lastW[0], w[1] - lastW[1], w[2] - lastW[2] };
-    float dv[3] = { v[0] - lastV[0], v[1] - lastV[1], v[2] - lastV[2] };
-    memcpy(lastW, w, 12); memcpy(lastV, v, 12);
-    bool tilted = m[5] < 0.906f;                                // (up more than 25 degrees off)
-    bool jolt = sqrtf(Dot3(dw, dw)) > 0.6f || sqrtf(Dot3(dv, dv)) > 4.0f;
-    if (tilted || jolt) quietUntil = step + 30;                 // (and half a second after)
-    if (step > quietUntil || rows > 60000) return;
-    rows++;
-    fprintf(g_physLog, "%ld,%.2f,%.2f,%.2f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.2f,%.2f,%.2f,%.3f,%.3f,%.3f,%.2f,%.2f,%d/%d\n",
-            step, m[12], m[13], m[14], m[4], m[5], m[6], m[8], m[9], m[10], v[0], v[1], v[2], w[0], w[1], w[2],
-            sqrtf(Dot3(dv, dv)), sqrtf(Dot3(dw, dw)), wheels, total);
-    if ((rows & 255) == 0) fflush(g_physLog);
-}
-static void InstallPhysLog() {
-    if (!g_cfg.physLog) return;
-    char path[MAX_PATH]; snprintf(path, sizeof(path), "%s" MOD_FILE "_physics.csv", g_asiDir);
-    if (!(g_physLog = fopen(path, "w"))) return;
-    fprintf(g_physLog, "step,x,y,z,upx,upy,upz,fwdx,fwdy,fwdz,vx,vy,vz,wx,wy,wz,dv,dw,wheels\n");
-    if (!InstallCarSync()) { fclose(g_physLog); g_physLog = nullptr; return; }
-    Logf("physics log: your car on loops, banks and waves to %s\n", path);
-}
 // AI on loops (aiLoopSpeed). The AI eases off for a big loop's climb and, too
 // slow, drops off its wall or ceiling and tries again, and again. An AI car
 // (GSAIRaceCar_c) tilted more than 60 degrees from level, with a wheel on the
@@ -3546,7 +3489,8 @@ static void InstallIceFix() {
 //
 // Shields: the time (car's +0x1340 x 1.4) times shieldTime / megaShieldTime
 // (car+0x12B0 on, 0x4A7D20: +0x28 its radius, 5; +0x30 mega). shieldZap: a
-// race car within the radius + 1 of a shielded car is shocked - the tesla
+// race car within the radius + 1 (at most shieldTouch) of a shielded car - its
+// centre to the shielded car's - is shocked - the tesla
 // ray's sparks on it for a second (GSTeslaParams 0x4F3FA0, +0x40 the car, +0x7E
 // the super ray's look; 0x42C6E0 makes it, 0x428B00 ends it) - and slowed for
 // shieldSlow s (the parachute's slow; the tesla ray's sound), a mega shield's
@@ -3675,8 +3619,11 @@ static void ShockFx(BYTE* car, bool super) {
     slot->fx = fx; slot->endMs = now + 1000;
 }
 static void ShockEnds(DWORD now) {
-    for (Shock& x : g_shocks)
-        if (x.endMs && (LONG)(now - x.endMs) >= 0) { reinterpret_cast<void (__cdecl *)(int, int)>(0x428B00)(x.fx, 0); x.endMs = 0; }
+    for (Shock& x : g_shocks) {
+        if (!x.endMs || (LONG)(now - x.endMs) < 0) continue;
+        if (now - x.endMs < 2000) reinterpret_cast<void (__cdecl *)(int, int)>(0x428B00)(x.fx, 0);   // (long overdue: a race since -
+        x.endMs = 0;                                                                              //   its handle may be another's now)
+    }
 }
 static void ItemFxStep(BYTE* car, IceSeen*, DWORD now) {        // from IceTrack, once per car per step
     ShockEnds(now);
@@ -3746,36 +3693,15 @@ static void InstallItemFx() {
     Logf("items:%s\n", on[0] ? on : " as the game");
 }
 // ---------------------------------------------------------------------------
-// Why the fire button did nothing (test builds). The fire button's checks
-// (0x41E3C0) print why they refused into the game's debug print (0x5890F0, a
-// no-op in the release game): no weapon, already firing, "bAllowWeaponFire"
-// false (car+0x1220), or the car's toon state (car+0xF44: [+0] its state, the
-// state table 0x954730 x 0x30, +4 can fire) holding it. Logged here, with the
-// state and where the car is, at most once a second.
+// Firing on Spooky Sprint (shieldPowerFire). The fire button's checks (0x41E3C0)
+// ask the car's toon state (car+0xF44: [+0] its state; the state table 0x954730,
+// 0x30 each, +4 may fire, +5 may hold an item out) whether it may fire. State 4
+// is a track's shield power-up's (GSShieldToonPower_c, 0x4DB110) - and a stretch
+// of Spooky Sprint's road before the ghoul's ramp carries it as a surface
+// property (0x443180 sets the state from what the car touches), so nothing could
+// be fired there. State 4 now may fire and hold its item out, at the fire button,
+// the other way items are set off (0x46D210) and the gunner's update (0x42F070).
 // ---------------------------------------------------------------------------
-static LONG g_fireMsgLogged = 0;
-static void FireMsg(const char* fmt, va_list ap) {
-    static DWORD lastMs = 0;
-    static char last[96] = "";
-    char buf[96];
-    _vsnprintf(buf, sizeof(buf) - 1, fmt, ap);
-    buf[sizeof(buf) - 1] = 0;
-    for (char* c = buf; *c; c++) if (*c == '\n') *c = 0;
-    DWORD now = GetTickCount();
-    if (!lstrcmpA(buf, last) && now - lastMs < 1000) return;
-    lstrcpynA(last, buf, sizeof(last)); lastMs = now;
-    if (InterlockedIncrement(&g_fireMsgLogged) > 60) return;
-    BYTE* you = nullptr;
-    for (int i = 0; i < 8 && !you; i++) { BYTE* c = RaceCarAt(i); if (c && *reinterpret_cast<DWORD*>(c) == 0x8A0384) you = c; }
-    if (!you) { Logf("fire: %s\n", buf); return; }
-    BYTE* toon = *reinterpret_cast<BYTE**>(you + 0xF44);
-    int state = toon ? *reinterpret_cast<int*>(toon) : -1;
-    const float* p = reinterpret_cast<const float*>(you + 0x40);
-    Logf("fire: %s (your car: toon state %d, no-fire flag %d, at %.1f %.1f %.1f)\n", buf, state, you[0x1220], p[0], p[1], p[2]);
-}
-extern "C" void __cdecl FireMsgHook(const char* fmt, ...) {
-    va_list ap; va_start(ap, fmt); FireMsg(fmt, ap); va_end(ap);
-}
 static bool __attribute__((thiscall)) HkToonCanFire(BYTE* toon) {   // replaces call 0x451370 at 0x41E593
     if (*reinterpret_cast<int*>(toon) == 4) return true;       // (a shield power-up: fire anyway)
     return reinterpret_cast<bool (__attribute__((thiscall)) *)(BYTE*)>(0x451370)(toon);
@@ -3784,7 +3710,7 @@ static bool __attribute__((thiscall)) HkToonShowWpn(BYTE* toon) {   // replaces 
     if (*reinterpret_cast<int*>(toon) == 4) return true;
     return reinterpret_cast<bool (__attribute__((thiscall)) *)(BYTE*)>(0x451380)(toon);
 }
-static void InstallFireMsgs() {
+static void InstallToonFire() {
     if (g_cfg.shieldPowerFire) {
         if (PatchCall(hot::callToonCanFire, reinterpret_cast<void*>(&HkToonCanFire), 5) &&
             PatchCall(hot::callToonCanFire2, reinterpret_cast<void*>(&HkToonCanFire), 5) &&
@@ -3792,8 +3718,6 @@ static void InstallFireMsgs() {
             PatchCall(hot::callToonShowWpn[1], reinterpret_cast<void*>(&HkToonShowWpn), 5)) Logf("items: can be fired in toon state 4 (a shield power-up, or road marked with it - Spooky Sprint)\n");
         else Logf("items: shield power-up patch FAILED\n");
     }
-    if (!PatchCall(hot::callFireMsgA, reinterpret_cast<void*>(&FireMsgHook), 5) ||
-        !PatchCall(hot::callFireMsgB, reinterpret_cast<void*>(&FireMsgHook), 5)) Logf("fire: log patch FAILED\n");
 }
 // Items by position (itemOdds). A crate's item is rolled (0x4C3360) from the
 // weapon data's table: 22 rows (item id +0x24, 10 chance columns from +0x28),
@@ -3890,7 +3814,7 @@ static void InstallItemOdds() {
     ItemDefaults();
     g_itemRand ^= GetTickCount();
     if (!PatchCall(hot::callWeaponRoll, reinterpret_cast<void*>(&HkWeaponRoll), 5)) { Logf("items: patch FAILED\n"); return; }
-    Logf("items: by position - 1st %d items, front %d, middle %d, back %d (blue crates: the game's)\n",
+    Logf("items: by position - 1st %d items, front %d, middle %d, back %d (blue crates: the game's, EMP only for the last two)\n",
          g_itemsN[0], g_itemsN[1], g_itemsN[2], g_itemsN[3]);
 }
 static void InstallFallReset() {
@@ -3959,9 +3883,12 @@ static void QueueKick(BYTE* car, const HazardBox& b, float sp) {
 // second argument, +0x38C: the push and torque skipped, 0x4BAF1F; the loss of
 // control and the timing as before), and the car is thrown like a hazard's
 // throw (the same kick at its physics sync, the same put-back if it falls off
-// the track - not the flight through walls): weaponPush away from the hit - the
-// hit's own direction (+0: from a mine to the car, a rocket's flight) along the
-// ground - and weaponLift up, tumbling over away from it and spinning round.
+// the track; through the track's invisible walls - weaponWallMats - for
+// weaponFlyTime, not the real ones): a mine or bomb weaponPush away from the
+// hit - the hit's own direction (+0: from the mine to the car) along the
+// ground - and weaponLift up, tumbling over away from it and spinning round; a
+// rocket or mortar shell weaponForward along (the rocket's flight, the shell:
+// the car's own way) and weaponForwardLift up, flipping end over end.
 // ---------------------------------------------------------------------------
 static LONG g_wpLogged = 0;
 static DWORD g_wpRand = 0x2545F491;
@@ -4191,7 +4118,7 @@ static void HazardStep(BYTE* set) {                             // (after the ga
 // filter (0x489090) about each contact, and contacts of a flying car whose normal
 // is level (a wall, not the ground: |y| < 0.6) are deleted. The rest is 0x489090
 // as it was.
-static LONG g_hzWallsLogged = 0, g_wpWallsLogged = 0;
+static LONG g_hzWallsLogged = 0;
 typedef void (__cdecl *BoxHit_t)(BYTE* box, BYTE* car);
 extern "C" bool __cdecl HkContactFilter(BYTE* c) {
     BYTE* car = *reinterpret_cast<BYTE**>(c + 0x30);
@@ -4205,8 +4132,6 @@ extern "C" bool __cdecl HkContactFilter(BYTE* c) {
             bool pass = false;
             for (int i = 0; i < g_cfg.weaponWallMatCount && !pass; i++)
                 pass = idA == g_cfg.weaponWallMats[i] || idB == g_cfg.weaponWallMats[i];
-            if (++g_wpWallsLogged <= 30)
-                Logf("weapons: thrown car %p met a wall (materials %d, %d): %s\n", car, idA, idB, pass ? "through it" : "blocked");
             if (pass) return true;
         }
     }
@@ -5294,33 +5219,11 @@ static ULONG __stdcall HkDs3Release(void* b) {
 // wheel off the road for a step or two spins up free and the engine screams for a
 // moment. A sound whose pitch is set again within 0.1 s (one held on: an engine,
 // a skid) may rise at most soundPitchRise per 1/60 s from what it last played at;
-// a drop, or a sound (re)started after a pause, is as the game sets it. Test
-// builds: a jump of over 20% that still goes through is logged, with your car.
+// a drop, or a sound (re)started after a pause, is as the game sets it.
 typedef HRESULT (__stdcall *SetFreq_t)(void*, DWORD);
 static SetFreq_t g_dsSetFreq;
 struct FreqSeen { void* buf; DWORD freq, ms; };
 static FreqSeen g_freqSeen[64];
-static LONG g_freqLogged = 0;
-static int YourWheelsDown(BYTE** carOut) {
-    *carOut = nullptr;
-    for (int i = 0; i < 8; i++) {
-        BYTE* slot = reinterpret_cast<BYTE**>(0x953C90)[i];
-        BYTE* car = slot ? *reinterpret_cast<BYTE**>(slot + 0x10) : nullptr;
-        if (!car || *reinterpret_cast<DWORD*>(car) != 0x8A0384) continue;
-        *carOut = car;
-        int n = 0, groups = *reinterpret_cast<const int*>(car + 0x7DC);
-        for (int g = 0; g < groups && g < 8; g++) {
-            const BYTE* grp = reinterpret_cast<BYTE* const*>(car + 0x7E0)[g];
-            if (!grp) continue;
-            for (int k = 0; k < 4; k++) {
-                const BYTE* wh = reinterpret_cast<BYTE* const*>(grp + 0x6C)[k];
-                if (wh && *reinterpret_cast<void* const*>(wh + 0x298)) n++;
-            }
-        }
-        return n;
-    }
-    return -1;
-}
 static HRESULT __stdcall HkDsSetFreq(void* b, DWORD f) {
     DWORD now = GetTickCount();
     FreqSeen* e = nullptr; FreqSeen* slot = &g_freqSeen[0];
@@ -5330,16 +5233,6 @@ static HRESULT __stdcall HkDsSetFreq(void* b, DWORD f) {
         if (steps < 1.0f) steps = 1.0f;
         float cap = (float)e->freq * (1.0f + g_cfg.soundPitchRise * steps);
         if ((float)f > cap) f = (DWORD)cap;
-    }
-    if (e && f && e->freq && now - e->ms < 100 && g_freqLogged < 80) {
-        float r = (float)f / (float)e->freq;
-        if (r > 1.2f || r < 1.0f / 1.2f) {
-            g_freqLogged++;
-            BYTE* car; int wheels = YourWheelsDown(&car);
-            const float* v = car ? reinterpret_cast<const float*>(car + 0x260) : nullptr;
-            Logf("pitch: sound %p jumped %lu -> %lu Hz (x%.2f) in %lu ms; your car %.0f units/s, %d wheel(s) down\n", b, e->freq, f, r,
-                 now - e->ms, v ? sqrtf(Dot3(v, v)) : 0.0f, wheels);
-        }
     }
     if (!e) { e = slot; e->buf = b; }
     e->freq = f; e->ms = now;
@@ -5525,7 +5418,7 @@ static void VolRestore() {
     reinterpret_cast<void (__attribute__((thiscall)) *)(int*)>(hot::fnVolApply)(live);
     Logf("sound: volumes applied (effects %d, music %d, speech %d)\n", v[0], v[1], v[2]);
 }
-static bool Sound3dWanted() { return g_cfg.soundDoppler == 2 || g_cfg.soundOcclusion; }
+static bool Sound3dWanted() { return g_cfg.soundDoppler == 2 || g_cfg.soundOcclusion || g_cfg.soundPitchRise > 0.0f; }
 static void __cdecl HkSndUpdate(float dt) {
     if (g_snd3dState == 0 && Sound3dWanted()) Sound3dHook();
     if (!g_volRestored && g_cfg.soundKeepVolume && *reinterpret_cast<BYTE**>(hot::dsSingleton)) VolRestore();
@@ -6052,42 +5945,103 @@ static bool IsNumberTok(const char* s) {
     char* e; strtod(s, &e);
     return e != s && *e == 0;
 }
+// The tuning built in: with no BTOverdrive_tuning.txt these are the numbers, and
+// the file is written with them (to edit; delete it to get these back).
+static const char kTuningText[] =
+    "; BTOverdrive_tuning.txt - a lighter car, a livelier camera, more tyre smoke.\n"
+    "; Lines starting with ; are off: remove the ; to try one, add it to switch one off.\n"
+    ";   KEY = 2.5    KEY *= 1.3    KEY#1 *= 1.3 (2nd number after KEY)    @5F9FCF:KEY (only where that code reads it)\n"
+    "; BTOverdrive_tuning.log marks every value a line here changed (-> new value).\n"
+    "\n"
+    "; --- handling (the exaggerated test, brought back a bit) -------------------\n"
+    "; rotational inertia: lower = snappier turn-in (stock 1500 / 1800 / 1200)\n"
+    "@5FA011:INERTIA *= 0.4\n"
+    "@5FA029:INERTIA#1 *= 0.4\n"
+    "@5FA041:INERTIA#2 *= 0.4\n"
+    "; car body mass: lower = quicker launch, lighter feel (stock 299)\n"
+    "@5F9FCF:MASS *= 0.65\n"
+    "; suspension damping: higher = the car settles instead of bouncing over waves and in\n"
+    "; loops (stock 0.25 bump / 0.5 rebound; the springs are 40000)\n"
+    "@6B8820:DAMPING-RATIO *= 3.2\n"
+    "@6B8855:REBOUND-DAMPING-RATIO *= 1.6\n"
+    "; spring stiffness: lower = the wheels follow curves and dips instead of skipping off them (stock 40000)\n"
+    "@6B87E7:SPRING-STIFFNESS *= 0.75\n"
+    "\n"
+    "; --- camera ----------------------------------------------------------------\n"
+    "; field of view (stock 65; the speed FOV in BTOverdrive.ini adds to it at speed)\n"
+    "@4246F0:FOV *= 1.15\n"
+    "; distance behind the car (stock -11): closer\n"
+    "@5BC6A5:OFFSET#2 *= 0.75\n"
+    "; how much the camera reacts to acceleration and braking (it pulls back / dips\n"
+    "; in): ACTIVE-SCALE is the amount, ACTIVE-LIMIT the most it can move\n"
+    "ACTIVE-SCALE *= 3\n"
+    "ACTIVE-LIMIT *= 2\n"
+    "; sway (sideways swing in turns) and tilt (lean into turns)\n"
+    "SWAY *= 1.6\n"
+    "TILT *= 2\n"
+    "; trailing behind the car (stock 0.7): lower = tighter\n"
+    ";@5BC68C:LAG *= 0.8\n"
+    "\n"
+    "; --- tyre smoke and skids ----------------------------------------------------\n"
+    "; per surface: TYRESMOKE's first number is how much smoke (0-255; stock 170 on\n"
+    "; some surfaces, 64, 1 or 0 on others) -> the same strong smoke everywhere\n"
+    "TYRESMOKE = 200\n"
+    "; tyre particles spawned per slip (stock 15)\n"
+    "TIRE_PART_SPAWN_SCALE *= 2\n"
+    "; when the tyres count as skidding: SKID-DATA's first number is the slip where\n"
+    "; skids (marks and smoke) start (stock 0.45 / 0.15 / 0.01). Lower = earlier,\n"
+    "; so smoke shows when attacking turns, not only in big slides\n"
+    "SKID-DATA *= 0.5\n";
+static void TuningLine(char* line) {
+    if (g_tovN >= 512) return;
+    if (char* c = strpbrk(line, ";#\r\n")) {
+        if (*c == '#' && c[1] >= '0' && c[1] <= '9') {              // KEY#1: not a comment
+            if (char* c2 = strpbrk(c + 1, ";\r\n")) *c2 = 0;
+        } else *c = 0;
+    }
+    char* eq = strchr(line, '=');
+    if (!eq) return;
+    bool scale = eq > line && eq[-1] == '*';
+    char* ke = scale ? eq - 1 : eq;
+    *ke = 0;
+    char* k = line; while (*k == ' ' || *k == '\t') k++;
+    char* kend = k + strlen(k); while (kend > k && (kend[-1] == ' ' || kend[-1] == '\t')) *--kend = 0;
+    if (!*k) return;
+    TOverride& o = g_tov[g_tovN];
+    memset(&o, 0, sizeof(o));
+    if (char* colon = strchr(k, ':')) {
+        *colon = 0;
+        if (k[0] == '@') o.caller = strtoul(k + 1, nullptr, 16);
+        else lstrcpynA(o.file, k, sizeof(o.file));
+        k = colon + 1;
+    }
+    if (char* hash = strchr(k, '#')) { *hash = 0; o.idx = atoi(hash + 1); }
+    lstrcpynA(o.key, k, sizeof(o.key));
+    o.scale = scale;
+    o.v = (float)atof(eq + 1);
+    g_tovN++;
+}
 static void LoadTuning() {
     CarryOver(MOD_FILE "_tuning.txt", "HWBTMod_tuning.txt");
     char path[MAX_PATH]; snprintf(path, sizeof(path), "%s" MOD_FILE "_tuning.txt", g_asiDir);
-    FILE* f = fopen(path, "r");
-    if (!f) { Logf("tuning: no %s - the game's numbers as they are\n", path); return; }
     char line[256];
-    while (fgets(line, sizeof(line), f) && g_tovN < 512) {
-        if (char* c = strpbrk(line, ";#\r\n")) {
-            if (*c == '#' && c[1] >= '0' && c[1] <= '9') {          // KEY#1: not a comment
-                if (char* c2 = strpbrk(c + 1, ";\r\n")) *c2 = 0;
-            } else *c = 0;
-        }
-        char* eq = strchr(line, '=');
-        if (!eq) continue;
-        bool scale = eq > line && eq[-1] == '*';
-        char* ke = scale ? eq - 1 : eq;
-        *ke = 0;
-        char* k = line; while (*k == ' ' || *k == '\t') k++;
-        char* kend = k + strlen(k); while (kend > k && (kend[-1] == ' ' || kend[-1] == '\t')) *--kend = 0;
-        if (!*k) continue;
-        TOverride& o = g_tov[g_tovN];
-        memset(&o, 0, sizeof(o));
-        if (char* colon = strchr(k, ':')) {
-            *colon = 0;
-            if (k[0] == '@') o.caller = strtoul(k + 1, nullptr, 16);
-            else lstrcpynA(o.file, k, sizeof(o.file));
-            k = colon + 1;
-        }
-        if (char* hash = strchr(k, '#')) { *hash = 0; o.idx = atoi(hash + 1); }
-        lstrcpynA(o.key, k, sizeof(o.key));
-        o.scale = scale;
-        o.v = (float)atof(eq + 1);
-        g_tovN++;
+    if (FILE* f = fopen(path, "r")) {
+        while (fgets(line, sizeof(line), f)) TuningLine(line);
+        fclose(f);
+        Logf("tuning: %d change(s) from %s\n", g_tovN, path);
+        return;
     }
-    fclose(f);
-    Logf("tuning: %d change(s) from %s\n", g_tovN, path);
+    for (const char* p = kTuningText; *p; ) {                       // (the built-in lines)
+        const char* e = strchr(p, '\n');
+        size_t n = e ? (size_t)(e - p) : strlen(p);
+        if (n >= sizeof(line)) n = sizeof(line) - 1;
+        memcpy(line, p, n); line[n] = 0;
+        TuningLine(line);
+        p = e ? e + 1 : p + n;
+    }
+    bool wrote = false;
+    if (FILE* f = fopen(path, "w")) { wrote = fputs(kTuningText, f) >= 0; fclose(f); }
+    Logf("tuning: %d change(s) built in%s\n", g_tovN, wrote ? " (written to " MOD_FILE "_tuning.txt to edit)" : "");
 }
 // The script's file name (from the archive index), cached per script.
 static const char* ScriptName(BYTE* scr) {
@@ -6307,9 +6261,8 @@ BOOL APIENTRY DllMain(HMODULE h, DWORD reason, LPVOID reserved) {
             InstallItemOdds();
             InstallIceFix();
             InstallItemFx();
-            InstallFireMsgs();
+            InstallToonFire();
             InstallCarShadowDepth();
-            InstallPhysLog();
             InstallSteering();
             InstallGrid();
             InstallStartBoost();
