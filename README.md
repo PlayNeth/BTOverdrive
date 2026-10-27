@@ -23,7 +23,7 @@ It's forked from HWBTFix 0.3.8 and keeps all of its fixes: portable install, hig
   - streak sparks that move with the car.
 - **Sound:**
   - real Doppler;
-  - EAX reverb and occlusion (with a wrapper such as DSOAL);
+  - EAX reverb and occlusion (with an EAX-capable DirectSound such as [reAL](https://github.com/PlayNeth/reAL); see Install);
   - 64 voices;
   - fade-outs;
   - music streaming fixes;
@@ -41,6 +41,13 @@ See [CHANGELOG.md](CHANGELOG.md) for every change and the full list of INI keys.
    - On first start, the mod writes `BTOverdrive.ini`, which lists every option with notes.
    - It also writes `BTOverdrive_tuning.txt` with the built-in tuning.
    - Its log goes to `BTOverdrive.log`.
+
+For EAX reverb and occlusion, install [reAL](https://github.com/PlayNeth/reAL): Windows' own DirectSound has no EAX.
+The game creates its DirectSound through COM, so a `dsound.dll` placed in `Bin` isn't loaded on its own:
+- **Windows:** put reAL's `dsound.dll` in `Bin`, then use reAL's
+  [`dsound-com-redirect.reg`](https://github.com/PlayNeth/reAL/blob/main/tools/dsound-com-redirect.reg)
+  with the path set to that `dsound.dll`.
+- **Wine / Proton:** install reAL into the prefix with its `install.sh`.
 
 Don't install HWBTFix alongside it. Whichever of the two loads second finds the game already patched and stays off.
 
