@@ -57,7 +57,7 @@
 
 #define MOD_NAME "Beat That! Overdrive"
 #define MOD_FILE "BTOverdrive"                   // .asi, .ini, logs, tuning file
-#define HWBT_VERSION "0.5.3-test13"
+#define HWBT_VERSION "0.5.3-test16"
 #define HWBT_BASE "HWBTFix 0.3.8"
 
 // ---------------------------------------------------------------------------
@@ -144,6 +144,8 @@ namespace hot {
     const DWORD callBlastHit   = 0x4A38F0;   // call 0x457C70 in an explosion's update (0x4A3610): each car in its reach, a hit of kind 1
                                              //   (a small push, 0x456290); here esi = the car, edi = the explosion (+0x2C centre, +0x10 reach squared)
     const DWORD fnTakeHit      = 0x457C70;
+    const DWORD stickContact1  = 0x66E91D;   // cmp dword [esi+0x2AC],0 (7): the road-sticking pull (0x66E790) only with a wheel down
+    const DWORD stickContact2  = 0x66EAB1;   // cmp dword [esi+0x2AC],0 (7): ... and the extra fall pull (x2.5) only without
     const DWORD carShadowFar   = 0x603D25;   // fadd qword [0x8A4268] (3.0): the car shadow projector's far plane = 10 + 3 + 1.4
     const DWORD musEndNoLoop   = 0x53B041;   // je (6 bytes): the music stream at its end, not set to loop - stop for good
     const DWORD vtSteerSetup   = 0x8C8F94;   // RaceCarSteering's vtable (0x8C8F3C) +0x58: its setup (0x6C6D30, thiscall): +0x74 how fast
@@ -342,6 +344,9 @@ namespace hot {
         { 0x6C6E12,       "\xD9\x05\xC0\x8F\x8C\x00\xD9\x5E\x74", 9 },   // fld [0x8C8FC0] / fstp [esi+0x74]
         { 0x53B03E,       "\x38\x46\x28\x0F\x84\xB5\x00\x00\x00", 9 },   // cmp [esi+0x28],al / je 0x53B0FC
         { 0x603D1E,       "\xD9\x05\x80\x87\x93\x00\x51\xDC\x05\x68\x42\x8A\x00", 13 },   // fld [0x938780] / push ecx / fadd [0x8A4268]
+        { 0x66E91D,       "\x83\xBE\xAC\x02\x00\x00\x00\xC6\x86\xE4\x01\x00\x00\x01", 14 },
+        { 0x66E96D,       "\x0F\x84\x92\x00\x00\x00", 6 },                // je 0x66EA05 (no wheel down: no pull)
+        { 0x66EAB1,       "\x83\xBE\xAC\x02\x00\x00\x00\x75\x54", 9 },   // ... / jne 0x66EB0E
         { fnTakeHit,      "\x83\xEC\x0C\x53\x8B\xD9\x80\xBB\xD4\x12\x00\x00\x00", 13 },
         { fnStuntStart,   "\x51\x53\x8B\x5C\x24\x0C\x56\x57\x8B\xF1\x33\xFF", 12 },
         { 0x4BAF1F,       "\x80\xBE\x8C\x03\x00\x00\x00", 7 },   // cmp byte [esi+0x38C],0: the roll's push and torque skipped when quiet
@@ -516,7 +521,12 @@ struct Config {
     int   hazardSmoke = 1;               // a burst of smoke on a car the hazard throws
     float steerRate = 2.5f;              // how fast the front wheels turn when you steer: x the game's (0.96 rad/s - over a second to full lock)
     float carShadowDepth = 1.9f;         // how far below a car's middle its shadow reaches (game: 4.4 - through to a road below)
-    int   aiUnstuck = 1;                 // an AI car that's been driving for 6 s without getting anywhere is put back on the track
+    int   loopStick = 1;                 // loops and waves: the pull to the road held through a wheel's brief hop off it
+    float loopStickTime = 0.25f;         //   for this long after the last wheel touched (s)
+    float loopStickDist = 2.5f;          //   while the road is this close under the car's middle (units)
+    int   aiUnstuck = 1;
+    float aiLoopSpeed = 50.0f;           // an AI car on a loop's wall or ceiling keeps at least this speed (units/s; 0 = off)
+    int   physLog = 1;                   // (test builds) your car's physics on loops and waves to BTOverdrive_physics.csv                 // an AI car that's been driving for 6 s without getting anywhere is put back on the track
     int   fallReset = 1;                 // any race car that falls off the track into the void is put back where it left it
     float hazardFallReset = 25.0f;       // a thrown car this far below where it was hit is put back on the track (0 = never)
     float hazardPushTime = 0.5f;         // the throw keeps pushing for this long (seconds)
@@ -718,6 +728,15 @@ static const char kIniText[] =
     ";   through the scenery beside them. 1 = it's pulled in toward the nearest car when the scenery is\n"
     ";   in the way (0 = as the game)\n"
     "introCamClip=1\n"
+    "; --- loops and waves ---\n"
+    "; the game pulls a car to the road under it (what holds it in a loop or upside down) only while a\n"
+    ";   wheel touches it - over waves and in loops the wheels hop off for a step or two, the pull lets go,\n"
+    ";   the fall pull takes over and the car bangs back down: the jitter. 1 = the pull is held for\n"
+    ";   loopStickTime seconds after the last wheel touched, while the road is within loopStickDist of\n"
+    ";   the car's middle (0 = the game's)\n"
+    "loopStick=1\n"
+    "loopStickTime=0.25\n"
+    "loopStickDist=2.5\n"
     "; --- falling off ---\n"
     "; on every track, a race car (yours or the AI's) that falls off into the void is put back on the\n"
     ";   track where it left it, with the game's own put-back - the game's never found it a place from\n"
@@ -726,6 +745,10 @@ static const char kIniText[] =
     "; an AI car that's been driving for 6 seconds without getting anywhere - lost, or ramming a shortcut's\n"
     ";   barrier over and over - is put back on the track at the nearest reset point (0 = left to it)\n"
     "aiUnstuck=1\n"
+    "; the AI slows for a big loop and drops off its wall or ceiling, again and again: an AI car on a\n"
+    ";   loop's wall or ceiling (tilted over 60 degrees, on the road) keeps at least this speed (units/s;\n"
+    ";   cars race at about 50-75) - 0 = as the game\n"
+    "aiLoopSpeed=50\n"
     "; --- weapon hits ---\n"
     "; weapon hits throw the car instead of the game's roll on the spot. A mine, airstrike bomb or\n"
     ";   parachute bomb throws it weaponPush units/s away from the blast and weaponLift up, tumbling\n"
@@ -1068,6 +1091,11 @@ static void LoadConfig() {
         else if (!_stricmp(key, "hazardFallReset"))    g_cfg.hazardFallReset = (float)atof(val);
         else if (!_stricmp(key, "fallReset"))          g_cfg.fallReset = n;
         else if (!_stricmp(key, "aiUnstuck"))          g_cfg.aiUnstuck = n;
+        else if (!_stricmp(key, "aiLoopSpeed"))        g_cfg.aiLoopSpeed = (float)atof(val);
+        else if (!_stricmp(key, "loopStick"))          g_cfg.loopStick = n;
+        else if (!_stricmp(key, "loopStickTime"))      g_cfg.loopStickTime = (float)atof(val);
+        else if (!_stricmp(key, "loopStickDist"))      g_cfg.loopStickDist = (float)atof(val);
+        else if (!_stricmp(key, "physLog"))            g_cfg.physLog = n;
         else if (!_stricmp(key, "carShadowDepth"))     g_cfg.carShadowDepth = (float)atof(val);
         else if (!_stricmp(key, "steerRate"))          { float v = (float)atof(val); g_cfg.steerRate = v < 0.1f ? 0.1f : v > 10.0f ? 10.0f : v; }
     }
@@ -1414,7 +1442,10 @@ static void NoteHazardCar(BYTE* car);
 static void HazardFallCheck(BYTE* car);
 static bool g_fallOn = false;
 static bool g_aiStuckOn = false;
+static FILE* g_physLog = nullptr;
+static void PhysLogStep(BYTE* car);
 static void AiStuckTrack(BYTE* car);
+static void AiLoopAssist(BYTE* car);
 static bool g_sndStepHooked = false;                  // the sound update (once per step) is hooked: HkSndUpdate
 static void FallTrack(BYTE* car);
 extern "C" void __cdecl RegCar(BYTE* car) {          // per car, per step, at the start of its physics sync
@@ -1422,6 +1453,8 @@ extern "C" void __cdecl RegCar(BYTE* car) {          // per car, per step, at th
     if (g_hzOn) { NoteHazardCar(car); if (g_kicksPending) ApplyHazardKick(car); HazardFallCheck(car); }
     if (g_fallOn) FallTrack(car);
     if (g_aiStuckOn) AiStuckTrack(car);
+    if (g_cfg.aiLoopSpeed > 0.0f) AiLoopAssist(car);
+    if (g_physLog) PhysLogStep(car);
     if (!g_interpOn) return;
     if (Track* t = FindTrack(car, 1)) t->seenStep = g_stepsDone + 1;
 }
@@ -3172,6 +3205,153 @@ static void InstallAiUnstuck() {
     if (!g_sndStepHooked || !InstallCarSync()) { Logf("ai: unstuck patch FAILED\n"); return; }
     g_aiStuckOn = true;
     Logf("ai: a car stuck for 6 s is put back on the track\n");
+}
+// (diagnostic, test builds: physLog=1) Your car's physics step by step while it
+// isn't level (loops, banks, waves: up tilted over 25 degrees) or its turning
+// jumps, to BTOverdrive_physics.csv: position, up, velocity, spin, wheels on the
+// ground - to find where loops and wavy roads jolt.
+static void PhysLogStep(BYTE* car) {
+    if (*reinterpret_cast<DWORD*>(car) != 0x8A0384) return;     // your car
+    static LONG step = 0, rows = 0; static float lastW[3], lastV[3]; static LONG quietUntil = 0;
+    step++;
+    const float* m = reinterpret_cast<const float*>(car + 0x10);
+    const float* v = reinterpret_cast<const float*>(car + 0x260);
+    const float* w = reinterpret_cast<const float*>(car + 0x26C);
+    int wheels = 0, total = 0;
+    int groups = *reinterpret_cast<const int*>(car + 0x7DC);
+    for (int g = 0; g < groups && g < 8; g++) {
+        const BYTE* grp = reinterpret_cast<BYTE* const*>(car + 0x7E0)[g];
+        if (!grp) continue;
+        for (int k = 0; k < 4; k++) {
+            const BYTE* wh = reinterpret_cast<BYTE* const*>(grp + 0x6C)[k];
+            if (!wh) continue;
+            total++;
+            if (*reinterpret_cast<void* const*>(wh + 0x298)) wheels++;
+        }
+    }
+    float dw[3] = { w[0] - lastW[0], w[1] - lastW[1], w[2] - lastW[2] };
+    float dv[3] = { v[0] - lastV[0], v[1] - lastV[1], v[2] - lastV[2] };
+    memcpy(lastW, w, 12); memcpy(lastV, v, 12);
+    bool tilted = m[5] < 0.906f;                                // (up more than 25 degrees off)
+    bool jolt = sqrtf(Dot3(dw, dw)) > 0.6f || sqrtf(Dot3(dv, dv)) > 4.0f;
+    if (tilted || jolt) quietUntil = step + 30;                 // (and half a second after)
+    if (step > quietUntil || rows > 60000) return;
+    rows++;
+    fprintf(g_physLog, "%ld,%.2f,%.2f,%.2f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.2f,%.2f,%.2f,%.3f,%.3f,%.3f,%.2f,%.2f,%d/%d\n",
+            step, m[12], m[13], m[14], m[4], m[5], m[6], m[8], m[9], m[10], v[0], v[1], v[2], w[0], w[1], w[2],
+            sqrtf(Dot3(dv, dv)), sqrtf(Dot3(dw, dw)), wheels, total);
+    if ((rows & 255) == 0) fflush(g_physLog);
+}
+static void InstallPhysLog() {
+    if (!g_cfg.physLog) return;
+    char path[MAX_PATH]; snprintf(path, sizeof(path), "%s" MOD_FILE "_physics.csv", g_asiDir);
+    if (!(g_physLog = fopen(path, "w"))) return;
+    fprintf(g_physLog, "step,x,y,z,upx,upy,upz,fwdx,fwdy,fwdz,vx,vy,vz,wx,wy,wz,dv,dw,wheels\n");
+    if (!InstallCarSync()) { fclose(g_physLog); g_physLog = nullptr; return; }
+    Logf("physics log: your car on loops, banks and waves to %s\n", path);
+}
+// Loops and waves (loopStick). A car is held to the road by its controller's
+// road pull (0x66E790, every step): a line test along its pull direction finds
+// the road under it, and the pull - g x mass toward that road - is applied only
+// while a wheel touches the road (+0x2AC); without, an extra fall pull (2.5 x
+// world down) instead. The physics log showed loops and waves taken with the
+// wheels on and off the road every step or two - the pull let go, the fall pull
+// took over, the car banged back: spin and speed jolting each step. So the
+// pull is kept (and the fall pull held off) for loopStickTime after a wheel last
+// touched, while the road the line test found is within loopStickDist of the
+// car's middle along its normal (0x969838 normal, 0x969848 point) - over a
+// crest or off a jump the road falls away fast, and the car flies as before.
+struct StickState { BYTE* ctl; DWORD touchMs; };
+static StickState g_stick[16];
+static BYTE* g_stickCtl = nullptr; static int g_stickVal = 0; static bool g_stickFresh = false;
+static LONG g_stickHeld = 0, g_stickAll = 0; static DWORD g_stickLogMs = 0;
+extern "C" int __cdecl StickDecide(BYTE* ctl, int first) {
+    int contact = *reinterpret_cast<const int*>(ctl + 0x2AC) != 0;
+    if (!first) {                                               // (the fall-pull check: as the pull was decided)
+        if (g_stickFresh && g_stickCtl == ctl) { g_stickFresh = false; return g_stickVal; }
+        return contact;
+    }
+    DWORD now = GetTickCount();
+    StickState* e = nullptr; StickState* slot = &g_stick[0];
+    for (StickState& x : g_stick) {
+        if (x.ctl == ctl) { e = &x; break; }
+        if (now - x.touchMs > now - slot->touchMs) slot = &x;
+    }
+    if (!e) { e = slot; e->ctl = ctl; e->touchMs = 0; }
+    int val = contact;
+    if (contact) e->touchMs = now;
+    else if (e->touchMs && now - e->touchMs < (DWORD)(g_cfg.loopStickTime * 1000.0f)) {
+        BYTE* car = *reinterpret_cast<BYTE**>(ctl + 0x58);
+        const float* p = reinterpret_cast<const float*>(car + 0x40);
+        const float* n = reinterpret_cast<const float*>(hot::lineHitGlobals + 0x20);   // 0x969838: the road's normal
+        const float* h = reinterpret_cast<const float*>(hot::lineHitGlobals + 0x30);   // 0x969848: where the line met it
+        float d[3] = { p[0] - h[0], p[1] - h[1], p[2] - h[2] };
+        float above = d[0] * n[0] + d[1] * n[1] + d[2] * n[2];
+        if (above > -1.0f && above < g_cfg.loopStickDist) { val = 1; g_stickHeld++; }
+    }
+    g_stickAll++;
+    if (now - g_stickLogMs > 30000 && g_stickHeld) {
+        g_stickLogMs = now;
+        Logf("loops: the road pull held through %ld of %ld steps without a wheel down\n", g_stickHeld, g_stickAll);
+    }
+    g_stickCtl = ctl; g_stickVal = val; g_stickFresh = true;
+    return val;
+}
+extern "C" void StickStub1(); extern "C" void StickStub2();
+asm(".text\n"
+    ".globl _StickStub1\n_StickStub1:\n"      // replaces cmp dword [esi+0x2AC],0 at 0x66E91D: ZF = no pull
+    "    pushal\n"
+    "    pushl $1\n"
+    "    pushl %esi\n"
+    "    call _StickDecide\n"
+    "    addl $8, %esp\n"
+    "    testl %eax, %eax\n"
+    "    popal\n"                                 // (popal leaves the flags)
+    "    ret\n"
+    ".globl _StickStub2\n_StickStub2:\n"      // ... at 0x66EAB1: ZF = no wheel down (the fall pull)
+    "    pushal\n"
+    "    pushl $0\n"
+    "    pushl %esi\n"
+    "    call _StickDecide\n"
+    "    addl $8, %esp\n"
+    "    testl %eax, %eax\n"
+    "    popal\n"
+    "    ret\n");
+static void InstallLoopStick() {
+    if (!g_cfg.loopStick) return;
+    bool ok = PatchCall(hot::stickContact1, reinterpret_cast<void*>(&StickStub1), 7) &&
+              PatchCall(hot::stickContact2, reinterpret_cast<void*>(&StickStub2), 7);
+    Logf(ok ? "loops: the road pull held %.2f s after a wheel lifts, within %.1f of the road\n" : "loops: patch FAILED\n",
+         g_cfg.loopStickTime, g_cfg.loopStickDist);
+}
+// AI on loops (aiLoopSpeed). The AI eases off for a big loop's climb and, too
+// slow, drops off its wall or ceiling and tries again, and again. An AI car
+// (GSAIRaceCar_c) tilted more than 60 degrees from level, with a wheel on the
+// road in the last quarter second and moving forward, has its speed brought up
+// to aiLoopSpeed along the way it's going (at its physics sync, as the hazard
+// throws are). Your car is left alone.
+static LONG g_aiLoopLogged = 0;
+static void AiLoopAssist(BYTE* car) {                           // from RegCar, once per car per step
+    if (*reinterpret_cast<DWORD*>(car) != 0x8A0144) return;
+    struct Seen { BYTE* car; DWORD groundMs; };
+    static Seen seen[16];
+    DWORD now = GetTickCount();
+    Seen* e = nullptr; Seen* slot = &seen[0];
+    for (Seen& x : seen) { if (x.car == car) { e = &x; break; } if (now - x.groundMs > now - slot->groundMs) slot = &x; }
+    if (!e) { e = slot; e->car = car; e->groundMs = 0; }
+    if (*reinterpret_cast<void**>(car + 0x121C)) e->groundMs = now;
+    const float* m = reinterpret_cast<const float*>(car + 0x10);
+    if (m[5] > 0.5f || !e->groundMs || now - e->groundMs > 250) return;   // (level enough, or off the road)
+    if (*reinterpret_cast<volatile BYTE*>(hot::introActive)) return;
+    for (const HazardKick& k : g_kicks) if (k.car == car && k.flying && now - k.flying < 4000) return;   // (thrown)
+    const float* v = reinterpret_cast<const float*>(car + 0x260);
+    float sp = sqrtf(Dot3(v, v));
+    if (sp < 1.0f || sp >= g_cfg.aiLoopSpeed || Dot3(v, m + 8) <= 0.0f) return;   // (still, fast enough, or going backward)
+    float k = g_cfg.aiLoopSpeed / sp;
+    float nv[3] = { v[0] * k, v[1] * k, v[2] * k };
+    reinterpret_cast<SetVec_t>(hot::fnSetLinVel)(car, nv);
+    if (InterlockedIncrement(&g_aiLoopLogged) <= 10)
+        Logf("ai: car %p on a loop at %.0f units/s (tilted, up %.2f): brought up to %.0f\n", car, sp, m[5], g_cfg.aiLoopSpeed);
 }
 static void InstallFallReset() {
     if (!g_cfg.fallReset) { Logf("fall reset: off\n"); return; }
@@ -5494,6 +5674,8 @@ BOOL APIENTRY DllMain(HMODULE h, DWORD reason, LPVOID reserved) {
             InstallFallReset();
             InstallAiUnstuck();
             InstallCarShadowDepth();
+            InstallPhysLog();
+            InstallLoopStick();
             InstallSteering();
             InstallGrid();
             InstallStartBoost();
