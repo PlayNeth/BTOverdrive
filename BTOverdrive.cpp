@@ -57,7 +57,7 @@
 
 #define MOD_NAME "Beat That! Overdrive"
 #define MOD_FILE "BTOverdrive"                   // .asi, .ini, logs, tuning file
-#define HWBT_VERSION "0.5.3-test20"
+#define HWBT_VERSION "0.5.3-test21"
 #define HWBT_BASE "HWBTFix 0.3.8"
 
 // ---------------------------------------------------------------------------
@@ -144,6 +144,8 @@ namespace hot {
     const DWORD callBlastHit   = 0x4A38F0;   // call 0x457C70 in an explosion's update (0x4A3610): each car in its reach, a hit of kind 1
                                              //   (a small push, 0x456290); here esi = the car, edi = the explosion (+0x2C centre, +0x10 reach squared)
     const DWORD fnTakeHit      = 0x457C70;
+    const DWORD callIceHit     = 0x4A341B;   // call 0x478E40 (freeze, thiscall car+0x1360): the upgraded ice gun's shot hit a car
+    const DWORD callIceFull    = 0x4790C7;   // call 0x478E40 in the freeze update (0x479050): the ice built up to 10 (the plain ice gun)
     const DWORD callWeaponRoll = 0x4620BC;   // call 0x4C3360: a crate's item (thiscall table; position 1.., cars, roll, blue)
     const DWORD carShadowFar   = 0x603D25;   // fadd qword [0x8A4268] (3.0): the car shadow projector's far plane = 10 + 3 + 1.4
     const DWORD musEndNoLoop   = 0x53B041;   // je (6 bytes): the music stream at its end, not set to loop - stop for good
@@ -461,6 +463,8 @@ namespace hot {
         { callKinCreate,  "\xE8\xA9\xB8\x10\x00", 5 },               // call 0x5F2260
         { fnSetLinVel,    "\x8B\x44\x24\x04\x56\x57\x8B\xF9", 8 },   // mov eax,[esp+4] / push esi / push edi / mov edi,ecx
         { fnSetAngVel,    "\x8B\x54\x24\x04\x56\x8B\x32", 7 },       // mov edx,[esp+4] / push esi / mov esi,[edx]
+        { callIceHit,     "\xE8\x20\x5A\xFD\xFF", 5 },               // call 0x478E40
+        { callIceFull,    "\xE8\x74\xFD\xFF\xFF", 5 },               // call 0x478E40
     };
 }
 
@@ -522,6 +526,7 @@ struct Config {
     int   itemOdds = 1;                  // what a crate gives by race position (itemsFirst/Front/Mid/Back); 0 = the game's table
     int   aiUnstuck = 1;
     float aiLoopSpeed = 50.0f;           // an AI car on a loop's wall or ceiling keeps at least this speed (units/s; 0 = off)
+    int   iceFix = 1;                    // the ice gun: no freezing a frozen car again, a moment free after breaking out, the AI frozen too
     int   physLog = 1;                   // (test builds) your car's physics on loops and waves to BTOverdrive_physics.csv                 // an AI car that's been driving for 6 s without getting anywhere is put back on the track
     int   fallReset = 1;                 // any race car that falls off the track into the void is put back where it left it
     float hazardFallReset = 25.0f;       // a thrown car this far below where it was hit is put back on the track (0 = never)
@@ -736,6 +741,10 @@ static const char kIniText[] =
     ";   loop's wall or ceiling (tilted over 60 degrees, on the road) keeps at least this speed (units/s;\n"
     ";   cars race at about 50-75) - 0 = as the game\n"
     "aiLoopSpeed=50\n"
+    "; the ice gun: a frozen car isn't frozen again on top (each shot restarted it), a car that's just\n"
+    ";   broken out is free for a second, its steering always comes back with the ice, and a frozen AI\n"
+    ";   car can't steer either (it drove on as if nothing happened) - 0 = as the game\n"
+    "iceFix=1\n"
     "; --- items ---\n"
     "; what a crate gives, by race position (as in Mario Kart: the leader gets defence, the back of the\n"
     ";   pack the big weapons): 1st, the front (top third), the middle, the back (the last two). Each\n"
@@ -1095,6 +1104,7 @@ static void LoadConfig() {
         else if (!_stricmp(key, "aiUnstuck"))          g_cfg.aiUnstuck = n;
         else if (!_stricmp(key, "itemOdds"))           g_cfg.itemOdds = n;
         else if (!_stricmp(key, "aiLoopSpeed"))        g_cfg.aiLoopSpeed = (float)atof(val);
+        else if (!_stricmp(key, "iceFix"))             g_cfg.iceFix = n;
         else if (!_stricmp(key, "physLog"))            g_cfg.physLog = n;
         else if (!_stricmp(key, "carShadowDepth"))     g_cfg.carShadowDepth = (float)atof(val);
         else if (!_stricmp(key, "steerRate"))          { float v = (float)atof(val); g_cfg.steerRate = v < 0.1f ? 0.1f : v > 10.0f ? 10.0f : v; }
@@ -1446,6 +1456,8 @@ static FILE* g_physLog = nullptr;
 static void PhysLogStep(BYTE* car);
 static void AiStuckTrack(BYTE* car);
 static void AiLoopAssist(BYTE* car);
+static void IceTrack(BYTE* car);
+static bool g_iceOn = false;
 static bool g_sndStepHooked = false;                  // the sound update (once per step) is hooked: HkSndUpdate
 static void FallTrack(BYTE* car);
 extern "C" void __cdecl RegCar(BYTE* car) {          // per car, per step, at the start of its physics sync
@@ -1454,6 +1466,7 @@ extern "C" void __cdecl RegCar(BYTE* car) {          // per car, per step, at th
     if (g_fallOn) FallTrack(car);
     if (g_aiStuckOn) AiStuckTrack(car);
     if (g_cfg.aiLoopSpeed > 0.0f) AiLoopAssist(car);
+    if (g_iceOn) IceTrack(car);
     if (g_physLog) PhysLogStep(car);
     if (!g_interpOn) return;
     if (Track* t = FindTrack(car, 1)) t->seenStep = g_stepsDone + 1;
@@ -3325,6 +3338,100 @@ static void AiLoopAssist(BYTE* car) {                           // from RegCar, 
     reinterpret_cast<SetVec_t>(hot::fnSetLinVel)(car, nv);
     if (InterlockedIncrement(&g_aiLoopLogged) <= 10)
         Logf("ai: car %p on a loop at %.0f units/s (tilted, up %.2f): brought up to %.0f\n", car, sp, m[5], g_cfg.aiLoopSpeed);
+}
+// The ice gun (iceFix). A car's freeze (car+0x1360: +0 the car, +4 who froze it,
+// +8 the ice built up - each plain ice gun pellet 1, melting 0.34 a second -
+// +0x10 its timer, +0x1C frozen) starts (0x478E40) when the ice reaches 10, or
+// at once for an upgraded ice gun's shot (0x4A33B0): 3.5 s, the ice block on
+// the car, and the controller's no-steering flag (car+0x810 +0x364, which
+// zeroes the steering at 0x66C266). It ends (0x478C60) when the time's up or
+// the driver breaks out (wiggling the stick left-right, 0x478D20), taking the
+// flag off. Each shot of the upgrade started it again on top (a new block, the
+// time from the start); the flag is shared with the tesla ray's; and an AI car
+// drives on frozen. Here: no freezing a car that's frozen, or broke out less
+// than a second ago; a no-steering flag still up a quarter second after the ice
+// went (and not since put up by anything else) is taken down; and a frozen AI
+// car's turning (its spin about its own up) is held at nothing each step.
+// ---------------------------------------------------------------------------
+struct IceSeen { BYTE* car; bool frozen; bool lock; DWORD frozeMs, endMs, lockMs, seenMs; bool leftover; };
+static IceSeen g_ice[16];
+static LONG g_iceLogged = 0;
+static IceSeen* IceFind(BYTE* car, bool add) {
+    DWORD now = GetTickCount();
+    IceSeen* slot = &g_ice[0];
+    for (IceSeen& e : g_ice) { if (e.car == car) return &e; if (now - e.seenMs > now - slot->seenMs) slot = &e; }
+    if (!add) return nullptr;
+    *slot = IceSeen{};
+    slot->car = car; slot->seenMs = now;
+    return slot;
+}
+static void IceLog(BYTE* car, const char* fmt, ...) {
+    if (InterlockedIncrement(&g_iceLogged) > 60) return;
+    char buf[160];
+    va_list ap; va_start(ap, fmt); _vsnprintf(buf, sizeof(buf) - 1, fmt, ap); va_end(ap);
+    buf[sizeof(buf) - 1] = 0;
+    DWORD vt = *reinterpret_cast<DWORD*>(car);
+    Logf("ice: car %p%s %s\n", car, vt == 0x8A0384 ? " (you)" : vt == 0x8A0144 ? " (AI)" : "", buf);
+}
+static void __attribute__((thiscall)) HkIceStart(BYTE* frz) {   // replaces the two calls of 0x478E40 (ecx = car+0x1360)
+    typedef void (__attribute__((thiscall)) *Fn)(BYTE*);
+    BYTE* car = *reinterpret_cast<BYTE**>(frz);
+    if (car && g_cfg.iceFix) {
+        IceSeen* e = IceFind(car, false);
+        DWORD now = GetTickCount();
+        if (frz[0x1C]) { IceLog(car, "hit again while frozen (%lu ms in): not frozen again on top", e ? now - e->frozeMs : 0ul); return; }
+        if (e && e->endMs && now - e->endMs < 1000) {
+            *reinterpret_cast<float*>(frz + 8) = 0.0f;           // (the plain gun's ice built up: gone with it)
+            IceLog(car, "hit %lu ms after breaking out: not frozen again yet", now - e->endMs);
+            return;
+        }
+    }
+    reinterpret_cast<Fn>(0x478E40)(frz);
+}
+static void IceTrack(BYTE* car) {                               // from RegCar, once per car per step
+    DWORD vt = *reinterpret_cast<DWORD*>(car);
+    if (vt != 0x8A0384 && vt != 0x8A0144 && vt != 0x8A3FA4) return;   // race cars only
+    BYTE* ctl = *reinterpret_cast<BYTE**>(car + 0x810);
+    if (!ctl) return;
+    IceSeen* e = IceFind(car, true);
+    DWORD now = GetTickCount();
+    e->seenMs = now;
+    bool frozen = car[0x1360 + 0x1C] != 0;
+    bool lock = ctl[0x364] != 0;
+    if (frozen && !e->frozen) {
+        e->frozeMs = now;
+        IceLog(car, "frozen by car %p", *reinterpret_cast<void**>(car + 0x1364));
+    } else if (!frozen && e->frozen) {
+        e->endMs = now;
+        e->leftover = lock;                                     // (the flag outlasting the ice)
+        IceLog(car, "thawed after %lu ms%s", now - e->frozeMs, lock ? " - its steering still locked" : "");
+    }
+    if (lock && !e->lock) e->lockMs = now;
+    if (!lock) e->leftover = false;
+    else if (!frozen && e->lockMs > e->endMs) e->leftover = false;   // (put up again since: the tesla's)
+    if (e->leftover && now - e->endMs > 250) {
+        ctl[0x364] = 0; lock = false; e->leftover = false;
+        IceLog(car, "steering still locked %lu ms after the ice went: unlocked", now - e->endMs);
+    }
+    e->frozen = frozen; e->lock = lock;
+    // a frozen AI car: no turning (the controller's flag only stops a driver's stick)
+    if (frozen && vt == 0x8A0144) {                             // (GSAIRaceCar_c)
+        const float* m = reinterpret_cast<const float*>(car + 0x10);
+        const float* up = m + 4;
+        const float* w = reinterpret_cast<const float*>(car + 0x26C);
+        float s = Dot3(w, up);
+        if (s > 0.02f || s < -0.02f) {
+            float nw[3] = { w[0] - up[0] * s, w[1] - up[1] * s, w[2] - up[2] * s };
+            reinterpret_cast<SetVec_t>(hot::fnSetAngVel)(car, nw);
+        }
+    }
+}
+static void InstallIceFix() {
+    if (!g_cfg.iceFix) { Logf("ice gun: as the game (iceFix=0)\n"); return; }
+    if (!InstallCarSync() || !PatchCall(hot::callIceHit, reinterpret_cast<void*>(&HkIceStart), 5) ||
+        !PatchCall(hot::callIceFull, reinterpret_cast<void*>(&HkIceStart), 5)) { Logf("ice gun: patch FAILED\n"); return; }
+    g_iceOn = true;
+    Logf("ice gun: no refreezing a frozen car, a second free after breaking out, frozen AI can't steer\n");
 }
 // Items by position (itemOdds). A crate's item is rolled (0x4C3360) from the
 // weapon data's table: 22 rows (item id +0x24, 10 chance columns from +0x28),
@@ -5726,6 +5833,7 @@ BOOL APIENTRY DllMain(HMODULE h, DWORD reason, LPVOID reserved) {
             InstallFallReset();
             InstallAiUnstuck();
             InstallItemOdds();
+            InstallIceFix();
             InstallCarShadowDepth();
             InstallPhysLog();
             InstallSteering();
