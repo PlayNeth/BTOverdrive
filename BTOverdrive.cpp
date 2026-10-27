@@ -57,7 +57,7 @@
 
 #define MOD_NAME "Beat That! Overdrive"
 #define MOD_FILE "BTOverdrive"                   // .asi, .ini, logs, tuning file
-#define HWBT_VERSION "0.5.3-test27"
+#define HWBT_VERSION "0.5.3-test28"
 #define HWBT_BASE "HWBTFix 0.3.8"
 
 // ---------------------------------------------------------------------------
@@ -5189,7 +5189,7 @@ typedef HRESULT (__stdcall *SetF_t)(void*, float, DWORD);
 typedef ULONG (__stdcall *Rel_t)(void*);
 typedef HRESULT (__stdcall *QI_t)(void*, const GUID&, void**);
 typedef HRESULT (__stdcall *KsSet_t)(void*, const GUID&, ULONG, void*, ULONG, void*, ULONG);
-static Set3_t g_ds3SetPos, g_ds3SetVel, g_dsLsnSetPos;
+static Set3_t g_ds3SetPos, g_ds3SetVel, g_dsLsnSetPos, g_dsLsnSetVel;
 static SetF_t g_dsLsnDoppler;
 static Rel_t g_ds3Release;
 struct SndSrc { void* buf; float pos[3]; LONG step; bool moving; void* ks; bool ksTried; LONG occ, occTarget; };
@@ -5197,6 +5197,9 @@ static SndSrc g_sndSrc[256];
 static LONG g_sndStep = 0;
 static float g_sndDt = 1.0f / 60.0f;
 static float g_lsnPos[3];
+static float g_lsnLast[3];                                      // (Doppler: the listener's position at its last update)
+static LONG g_lsnStep = LONG_MIN / 2;
+static bool g_lsnMoving = false;
 static int g_snd3dState = 0;                                    // 0 not yet, 1 hooked, -1 gave up
 static int g_snd3dTries = 0;
 static int g_occNext = 0;
@@ -5216,19 +5219,22 @@ static SndSrc* SndFind(void* buf, bool add) {
     free->ks = nullptr; free->ksTried = false; free->occ = free->occTarget = 0;
     return free;
 }
+static void SndMeasure(const float* last, LONG lastStep, float x, float y, float z, float* v) {   // (a speed from two positions)
+    v[0] = v[1] = v[2] = 0.0f;
+    LONG steps = g_sndStep - lastStep;
+    if (steps < 1 || steps > 4) return;
+    float d[3] = { x - last[0], y - last[1], z - last[2] };
+    if (Dot3(d, d) >= 100.0f * steps * steps) return;            // (over 10 units a step: a jump, not a speed)
+    float k = 1.0f / (steps * g_sndDt);
+    for (int a = 0; a < 3; a++) v[a] = d[a] * k;
+}
 static HRESULT __stdcall HkDs3SetPos(void* b, float x, float y, float z, DWORD apply) {
     HRESULT hr = g_ds3SetPos(b, x, y, z, apply);
     SndSrc* e = SndFind(b, true);
     if (!e) return hr;
-    LONG steps = g_sndStep - e->step;
-    if (steps == 0) return hr;                                  // (twice in one update: keep the first)
-    float v[3] = { 0, 0, 0 };
-    if (steps >= 1 && steps <= 4) {                             // (moved since its last position: a speed)
-        float d[3] = { x - e->pos[0], y - e->pos[1], z - e->pos[2] };
-        float k = 1.0f / (steps * g_sndDt);
-        if (Dot3(d, d) < 100.0f * steps * steps)                // (under 10 units a step: not a jump)
-            for (int a = 0; a < 3; a++) v[a] = d[a] * k;
-    }
+    if (g_sndStep == e->step) return hr;                        // (twice in one update: keep the first)
+    float v[3];
+    SndMeasure(e->pos, e->step, x, y, z, v);
     e->pos[0] = x; e->pos[1] = y; e->pos[2] = z; e->step = g_sndStep;
     if (g_cfg.soundDoppler == 2) {
         e->moving = v[0] != 0.0f || v[1] != 0.0f || v[2] != 0.0f;
@@ -5242,7 +5248,23 @@ static HRESULT __stdcall HkDs3SetVel(void* b, float x, float y, float z, DWORD a
 }
 static HRESULT __stdcall HkDsLsnSetPos(void* l, float x, float y, float z, DWORD apply) {
     g_lsnPos[0] = x; g_lsnPos[1] = y; g_lsnPos[2] = z;
-    return g_dsLsnSetPos(l, x, y, z, apply);
+    HRESULT hr = g_dsLsnSetPos(l, x, y, z, apply);
+    if (g_cfg.soundDoppler == 2 && g_dsLsnSetVel && g_sndStep != g_lsnStep) {
+        // The listener's velocity measured as the sounds' are (the game set your car's): a sound
+        // riding with the listener - your own engine - then has none relative to it. With the
+        // game's, the step your car's speed jumped (a hit, a boost, a landing) the listener had
+        // the new speed and the engine (measured) still the old: a squeal for a moment.
+        float v[3];
+        SndMeasure(g_lsnLast, g_lsnStep, x, y, z, v);
+        g_lsnLast[0] = x; g_lsnLast[1] = y; g_lsnLast[2] = z; g_lsnStep = g_sndStep;
+        g_lsnMoving = v[0] != 0.0f || v[1] != 0.0f || v[2] != 0.0f;
+        g_dsLsnSetVel(l, v[0], v[1], v[2], apply);
+    }
+    return hr;
+}
+static HRESULT __stdcall HkDsLsnSetVel(void* l, float x, float y, float z, DWORD apply) {
+    if (g_cfg.soundDoppler == 2) return S_OK;                   // (ours is set with the position)
+    return g_dsLsnSetVel(l, x, y, z, apply);
 }
 static HRESULT __stdcall HkDsLsnDoppler(void* l, float f, DWORD apply) {
     return g_dsLsnDoppler(l, g_cfg.soundDoppler == 2 ? g_cfg.soundDopplerScale : f, apply);
@@ -5285,11 +5307,13 @@ static void Sound3dHook() {                                     // (the game's s
         g_ds3SetVel = reinterpret_cast<Set3_t>(vt3[0x50 / 4]);
         g_dsLsnSetPos = reinterpret_cast<Set3_t>(vtl[0x38 / 4]);
         g_dsLsnDoppler = reinterpret_cast<SetF_t>(vtl[0x30 / 4]);
+        g_dsLsnSetVel = reinterpret_cast<Set3_t>(vtl[0x40 / 4]);
         ok = PatchPointer(&vt3[0x4C / 4], reinterpret_cast<void*>(&HkDs3SetPos)) &&
              PatchPointer(&vt3[0x50 / 4], reinterpret_cast<void*>(&HkDs3SetVel)) &&
              PatchPointer(&vt3[2], reinterpret_cast<void*>(&HkDs3Release)) &&
              PatchPointer(&vtl[0x38 / 4], reinterpret_cast<void*>(&HkDsLsnSetPos)) &&
-             PatchPointer(&vtl[0x30 / 4], reinterpret_cast<void*>(&HkDsLsnDoppler));
+             PatchPointer(&vtl[0x30 / 4], reinterpret_cast<void*>(&HkDsLsnDoppler)) &&
+             PatchPointer(&vtl[0x40 / 4], reinterpret_cast<void*>(&HkDsLsnSetVel));
         reinterpret_cast<Rel_t>(vt3[2])(b3);                    // (through the hook if it's in: not tracked anyway)
         if (g_cfg.soundDoppler == 2) g_dsLsnDoppler(lsn, g_cfg.soundDopplerScale, 0);   // (DS3D_IMMEDIATE)
     }
@@ -5445,6 +5469,11 @@ static void __cdecl HkSndUpdate(float dt) {
     if (g_cfg.soundDoppler == 2)
         for (SndSrc& e : g_sndSrc)                              // not moved for 2 updates: still
             if (e.buf && e.moving && g_sndStep - e.step >= 2) { e.moving = false; g_ds3SetVel(e.buf, 0, 0, 0, 0); }
+    if (g_cfg.soundDoppler == 2 && g_lsnMoving && g_sndStep - g_lsnStep >= 2) {   // (the listener too)
+        void* lsn = *reinterpret_cast<BYTE**>(hot::dsSingleton) ? *reinterpret_cast<void**>(*reinterpret_cast<BYTE**>(hot::dsSingleton) + 0xD0) : nullptr;
+        g_lsnMoving = false;
+        if (lsn) g_dsLsnSetVel(lsn, 0, 0, 0, 0);
+    }
     if (g_cfg.soundOcclusion) OcclusionStep();
 }
 // EAX. The game has zone-driven reverb: each frame the trigger zones the camera
