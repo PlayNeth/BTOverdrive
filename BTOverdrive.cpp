@@ -57,7 +57,7 @@
 
 #define MOD_NAME "Beat That! Overdrive"
 #define MOD_FILE "BTOverdrive"                   // .asi, .ini, logs, tuning file
-#define HWBT_VERSION "0.5.3-test28"
+#define HWBT_VERSION "0.5.3-test31"
 #define HWBT_BASE "HWBTFix 0.3.8"
 
 // ---------------------------------------------------------------------------
@@ -551,8 +551,9 @@ struct Config {
     int   hazardSmoke = 1;               // a burst of smoke on a car the hazard throws
     float steerRate = 2.5f;              // how fast the front wheels turn when you steer: x the game's (0.96 rad/s - over a second to full lock)
     float carShadowDepth = 1.9f;         // how far below a car's middle its shadow reaches (game: 4.4 - through to a road below)
+    float soundPitchRise = 0.06f;        // a sound held on (an engine) rises in pitch at most this much per 1/60 s (0 = as the game)
     int   shieldPowerFire = 1;           // items can be fired while a track's shield power-up is on (the game: not)
-    float blueEmp = 0.3f;                // a blue crate's super EMP: only for the last two, and kept this often (else rolled again)
+    float blueEmp = 0.5f;                // a blue crate's super EMP: only for the last two, and kept this often (else rolled again)
     int   itemOdds = 1;                  // what a crate gives by race position (itemsFirst/Front/Mid/Back); 0 = the game's table
     int   aiUnstuck = 1;
     float aiLoopSpeed = 50.0f;           // an AI car on a loop's wall or ceiling keeps at least this speed (units/s; 0 = off)
@@ -790,13 +791,19 @@ static const char kIniText[] =
     "itemsFirst=smoke:30, shield:30, mine:25, rocket:15\n"
     "itemsFront=rocket:25, mine:15, shield:15, mortar:12, parachute:10, icegun:10, boost:8, tesla:5\n"
     "itemsMid=rocket:18, mortar:15, parachute:15, icegun:12, boost:12, tesla:10, airstrike:8, mine:5, smoke:5\n"
-    "itemsBack=tesla:22, airstrike:20, boost:18, parachute:12, mortar:10, icegun:10, emp:2\n"
+    "itemsBack=tesla:22, airstrike:20, boost:18, parachute:12, mortar:10, icegun:10, emp:6\n"
     "; a blue crate's super EMP: only the last two places can get it, and only this share of the times\n"
     ";   the game's roll gives it (the rest are rolled again) - 1 = as often as the game, 0 = never\n"
-    "blueEmp=0.3\n"
+    "blueEmp=0.5\n"
     "; a track's shield power-up (Spooky Sprint's, before the ghoul's ramp...) shields the car for a while\n"
     ";   and the game won't let it fire its item until it wears off. 1 = it can fire (0 = as the game)\n"
     "shieldPowerFire=1\n"
+    "; --- engine sound ---\n"
+    "; an engine's pitch follows its wheels: a wheel off the road for a moment (a bump, a crest) spins up\n"
+    ";   and the engine screams for a few hundredths of a second. A sound held on (pitch set again within\n"
+    ";   0.1 s) rises at most this much per 1/60 s (0.06 = 6%: a real rev-up still goes through in a few\n"
+    ";   tenths, a blip of a step or two is cut); drops are as the game. 0 = as the game\n"
+    "soundPitchRise=0.06\n"
     "; the ice gun: a frozen car isn't frozen again on top (each shot restarted it), a car that's just\n"
     ";   broken out is free for a second, its steering always comes back with the ice, and a frozen AI\n"
     ";   car can't steer either (it drove on as if nothing happened) - 0 = as the game\n"
@@ -1166,6 +1173,7 @@ static void LoadConfig() {
         else if (!_stricmp(key, "aiUnstuck"))          g_cfg.aiUnstuck = n;
         else if (!_stricmp(key, "itemOdds"))           g_cfg.itemOdds = n;
         else if (!_stricmp(key, "aiLoopSpeed"))        g_cfg.aiLoopSpeed = (float)atof(val);
+        else if (!_stricmp(key, "soundPitchRise"))     g_cfg.soundPitchRise = (float)atof(val);
         else if (!_stricmp(key, "shieldPowerFire"))    g_cfg.shieldPowerFire = n;
         else if (!_stricmp(key, "blueEmp"))            g_cfg.blueEmp = (float)atof(val);
         else if (!_stricmp(key, "iceFix"))             g_cfg.iceFix = n;
@@ -3831,7 +3839,7 @@ static void ItemDefaults() {                                    // (the ini's de
         "smoke:30, shield:30, mine:25, rocket:15",
         "rocket:25, mine:15, shield:15, mortar:12, parachute:10, icegun:10, boost:8, tesla:5",
         "rocket:18, mortar:15, parachute:15, icegun:12, boost:12, tesla:10, airstrike:8, mine:5, smoke:5",
-        "tesla:22, airstrike:20, boost:18, parachute:12, mortar:10, icegun:10, emp:2" };
+        "tesla:22, airstrike:20, boost:18, parachute:12, mortar:10, icegun:10, emp:6" };
     static const char* const names[4] = { "First", "Front", "Mid", "Back" };
     for (int g = 0; g < 4; g++) if (!g_itemsSet[g]) ItemTableParse(names[g], def[g]);
 }
@@ -5281,6 +5289,62 @@ static ULONG __stdcall HkDs3Release(void* b) {
     }
     return g_ds3Release(b);
 }
+// Pitch (soundPitchRise). Every buffer's SetFrequency (IDirectSoundBuffer +0x44) is
+// watched. An engine's pitch follows its revs, and its revs its driven wheels: a
+// wheel off the road for a step or two spins up free and the engine screams for a
+// moment. A sound whose pitch is set again within 0.1 s (one held on: an engine,
+// a skid) may rise at most soundPitchRise per 1/60 s from what it last played at;
+// a drop, or a sound (re)started after a pause, is as the game sets it. Test
+// builds: a jump of over 20% that still goes through is logged, with your car.
+typedef HRESULT (__stdcall *SetFreq_t)(void*, DWORD);
+static SetFreq_t g_dsSetFreq;
+struct FreqSeen { void* buf; DWORD freq, ms; };
+static FreqSeen g_freqSeen[64];
+static LONG g_freqLogged = 0;
+static int YourWheelsDown(BYTE** carOut) {
+    *carOut = nullptr;
+    for (int i = 0; i < 8; i++) {
+        BYTE* slot = reinterpret_cast<BYTE**>(0x953C90)[i];
+        BYTE* car = slot ? *reinterpret_cast<BYTE**>(slot + 0x10) : nullptr;
+        if (!car || *reinterpret_cast<DWORD*>(car) != 0x8A0384) continue;
+        *carOut = car;
+        int n = 0, groups = *reinterpret_cast<const int*>(car + 0x7DC);
+        for (int g = 0; g < groups && g < 8; g++) {
+            const BYTE* grp = reinterpret_cast<BYTE* const*>(car + 0x7E0)[g];
+            if (!grp) continue;
+            for (int k = 0; k < 4; k++) {
+                const BYTE* wh = reinterpret_cast<BYTE* const*>(grp + 0x6C)[k];
+                if (wh && *reinterpret_cast<void* const*>(wh + 0x298)) n++;
+            }
+        }
+        return n;
+    }
+    return -1;
+}
+static HRESULT __stdcall HkDsSetFreq(void* b, DWORD f) {
+    DWORD now = GetTickCount();
+    FreqSeen* e = nullptr; FreqSeen* slot = &g_freqSeen[0];
+    for (FreqSeen& x : g_freqSeen) { if (x.buf == b) { e = &x; break; } if (now - x.ms > now - slot->ms) slot = &x; }
+    if (e && f && e->freq && now - e->ms < 100 && g_cfg.soundPitchRise > 0.0f && f > e->freq) {
+        float steps = (now - e->ms) / 16.7f;
+        if (steps < 1.0f) steps = 1.0f;
+        float cap = (float)e->freq * (1.0f + g_cfg.soundPitchRise * steps);
+        if ((float)f > cap) f = (DWORD)cap;
+    }
+    if (e && f && e->freq && now - e->ms < 100 && g_freqLogged < 80) {
+        float r = (float)f / (float)e->freq;
+        if (r > 1.2f || r < 1.0f / 1.2f) {
+            g_freqLogged++;
+            BYTE* car; int wheels = YourWheelsDown(&car);
+            const float* v = car ? reinterpret_cast<const float*>(car + 0x260) : nullptr;
+            Logf("pitch: sound %p jumped %lu -> %lu Hz (x%.2f) in %lu ms; your car %.0f units/s, %d wheel(s) down\n", b, e->freq, f, r,
+                 now - e->ms, v ? sqrtf(Dot3(v, v)) : 0.0f, wheels);
+        }
+    }
+    if (!e) { e = slot; e->buf = b; }
+    e->freq = f; e->ms = now;
+    return g_dsSetFreq(b, f);
+}
 static void Sound3dHook() {                                     // (the game's sound is up: find the methods)
     BYTE* ds = *reinterpret_cast<BYTE**>(hot::dsSingleton);
     void* dev = ds ? *reinterpret_cast<void**>(ds + 0x30) : nullptr;
@@ -5317,9 +5381,15 @@ static void Sound3dHook() {                                     // (the game's s
         reinterpret_cast<Rel_t>(vt3[2])(b3);                    // (through the hook if it's in: not tracked anyway)
         if (g_cfg.soundDoppler == 2) g_dsLsnDoppler(lsn, g_cfg.soundDopplerScale, 0);   // (DS3D_IMMEDIATE)
     }
+    {
+        void** vtb = *reinterpret_cast<void***>(buf);
+        g_dsSetFreq = reinterpret_cast<SetFreq_t>(vtb[0x44 / 4]);
+        if (!PatchPointer(&vtb[0x44 / 4], reinterpret_cast<void*>(&HkDsSetFreq))) Logf("pitch: watch patch FAILED\n");
+    }
     reinterpret_cast<Rel_t>((*reinterpret_cast<void***>(buf))[2])(buf);
     g_snd3dState = ok ? 1 : -1;
     if (!ok) { Logf("sound: 3D sound hook FAILED\n"); return; }
+    if (g_cfg.soundPitchRise > 0.0f) Logf("sound: a held sound's pitch rises at most %.0f%% per 1/60 s (engine blips)\n", g_cfg.soundPitchRise * 100.0f);
     if (g_cfg.soundDoppler == 2) Logf("sound: Doppler from the sounds' movement (x%.2f)\n", g_cfg.soundDopplerScale);
     if (g_cfg.soundOcclusion) Logf("sound: occlusion %s\n", ds[0xDA] ? "on (EAX)" : "off (no EAX)");
 }
