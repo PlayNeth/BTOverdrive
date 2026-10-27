@@ -57,7 +57,7 @@
 
 #define MOD_NAME "Beat That! Overdrive"
 #define MOD_FILE "BTOverdrive"                   // .asi, .ini, logs, tuning file
-#define HWBT_VERSION "0.5.3-test7"
+#define HWBT_VERSION "0.5.3-test8"
 #define HWBT_BASE "HWBTFix 0.3.8"
 
 // ---------------------------------------------------------------------------
@@ -558,6 +558,12 @@ struct Config {
     int   sparkCount = 3;                //   extra sparks thrown with each one the game throws
     float sparkSpread = 0.5f;            //   how far apart they scatter (x the spark's speed)
     float sparkUp = 1.0f;                //   how hard they're thrown upward (x the spark's speed)
+    float sparkInherit = 1.0f;           // collision sparks move with the car (x its velocity; the game: -0.2 x, backward)
+    float sparkBurst = 0.35f;            //   and burst off the contact at this x the car's sliding speed along it
+    float sparkBurstMin = 6.0f;          //   (at least this, units/s)
+    float sparkOut = 0.6f;               //   that burst: backward along the surface, this much out from the car,
+    float sparkLift = 0.4f;              //   this much up
+    float sparkLife = 0.6f;              //   their life x this (short, quick)
     float sparkImpactRef = 3800.0f;      //   a hit this strong throws normal-size sparks (in proportion; 0 = all the same)
     float sparkImpactMax = 1.6f;         //   ...and the hardest hits' sparks at most this x normal
     float sparkTwist = 25.0f;            //   each spark turned up to this many degrees off its course
@@ -845,6 +851,18 @@ static const char kIniText[] =
     "sparkRate=120\n"
     "sparkSpread=0.5\n"
     "sparkUp=1\n"
+    "; collision sparks move with the car: the game threw them backward (-0.2 x the car's velocity), so\n"
+    ";   at speed they all streamed straight back off the screen. sparkInherit: x the car's velocity they\n"
+    ";   keep (0 = the game's way); on top, a burst off the contact - sparkBurst x the car's sliding\n"
+    ";   speed along the wall or car (at least sparkBurstMin units/s), back along the surface, sparkOut\n"
+    ";   out from the car and sparkLift up; each streak's length shows that burst, as the camera sees\n"
+    ";   it. sparkLife: their life x this\n"
+    "sparkInherit=1\n"
+    "sparkBurst=0.35\n"
+    "sparkBurstMin=6\n"
+    "sparkOut=0.6\n"
+    "sparkLift=0.4\n"
+    "sparkLife=0.6\n"
     "; --- Rampage ---\n"
     "; AI cars start spread over the whole track instead of on the grid (1)\n"
     "rampageSpread=1\n"
@@ -999,6 +1017,12 @@ static void LoadConfig() {
         else if (!_stricmp(key, "sparkRate"))          g_cfg.sparkRate = (float)atof(val);
         else if (!_stricmp(key, "sparkCount"))         g_cfg.sparkCount = n;
         else if (!_stricmp(key, "sparkSpread"))        g_cfg.sparkSpread = (float)atof(val);
+        else if (!_stricmp(key, "sparkInherit"))       g_cfg.sparkInherit = (float)atof(val);
+        else if (!_stricmp(key, "sparkBurst"))         g_cfg.sparkBurst = (float)atof(val);
+        else if (!_stricmp(key, "sparkBurstMin"))      g_cfg.sparkBurstMin = (float)atof(val);
+        else if (!_stricmp(key, "sparkOut"))           g_cfg.sparkOut = (float)atof(val);
+        else if (!_stricmp(key, "sparkLift"))          g_cfg.sparkLift = (float)atof(val);
+        else if (!_stricmp(key, "sparkLife"))          { float v = (float)atof(val); g_cfg.sparkLife = v < 0.05f ? 0.05f : v > 3.0f ? 3.0f : v; }
         else if (!_stricmp(key, "sparkUp"))            g_cfg.sparkUp = (float)atof(val);
         else if (!_stricmp(key, "sparkImpactRef"))     g_cfg.sparkImpactRef = (float)atof(val);
         else if (!_stricmp(key, "sparkImpactMax"))     g_cfg.sparkImpactMax = (float)atof(val);
@@ -3819,6 +3843,9 @@ static DWORD g_sparkSwitched[50];                                // types switch
 static DWORD g_sparkBudgetMs = 0; static float g_sparkBudget = 0.0f;
 // The hit's strength: set while the game throws a collision's sparks (HkCollSparks), 0 otherwise.
 static float g_sparkImpact = 0.0f;
+// ... and the car (0: no collision) and the contact's vector for it (unit, or 0).
+static BYTE* g_sparkMover = nullptr;
+static float g_sparkN[3] = { 0, 0, 0 };
 // How big this hit's sparks are: impact / sparkImpactRef, 0.5 to sparkImpactMax (1 outside a collision).
 // (Hits measured in a race ran about 3300 to 5300, averaging 3800.)
 static float SparkScale() {
@@ -3902,6 +3929,44 @@ extern "C" void __cdecl SparkSpawned(BYTE* P, int type, BYTE* sys) {
         if (b < 0) b = 0;
         *reinterpret_cast<DWORD*>(P + 0x28) = 0x7Fu << 24 | (DWORD)r << 16 | (DWORD)g << 8 | (DWORD)b;
     }
+    // Moving with the car (sparkInherit). The game sends a collision's sparks off
+    // at -0.2 x the car's velocity (0x441BF0): backward in the world, so with the
+    // camera following the car they all streamed straight back. Instead, inside a
+    // collision, each one keeps the car's velocity and bursts off the contact:
+    // back along the surface (against the car's sliding along it), out from the
+    // car and up, scattered; as fast as sparkBurst x that sliding speed (a hard hit
+    // a bit faster). The streak - drawn along the spark's velocity, P+0x48 seconds
+    // of it - is cut to show the burst only, what the camera sees.
+    if (g_sparkMover && g_cfg.sparkInherit > 0.0f) {
+        BYTE* car = g_sparkMover;
+        const float* cv = reinterpret_cast<const float*>(car + 0x260);
+        const float* cp = reinterpret_cast<const float*>(car + 0x40);
+        float* pos = reinterpret_cast<float*>(P + 4);
+        float t[3] = { cv[0], cv[1], cv[2] };                   // the sliding along the surface: the car's velocity, its
+        float vn = Dot3(t, g_sparkN);                           //   part into the contact taken out
+        for (int a = 0; a < 3; a++) t[a] -= g_sparkN[a] * vn;
+        float tl = sqrtf(Dot3(t, t));
+        float o[3] = { pos[0] - cp[0], 0.0f, pos[2] - cp[2] };  // out from the car, level
+        float ol = sqrtf(Dot3(o, o));
+        if (ol > 1e-3f) { o[0] /= ol; o[2] /= ol; }
+        float dir[3];
+        for (int a = 0; a < 3; a++)
+            dir[a] = (tl > 1.0f ? -t[a] / tl : 0.0f) + o[a] * g_cfg.sparkOut * (0.3f + 0.7f * Rand01())
+                   + g_cfg.sparkSpread * (2.0f * Rand01() - 1.0f);
+        dir[1] += g_cfg.sparkLift * Rand01();
+        float dl = sqrtf(Dot3(dir, dir));
+        if (dl > 1e-3f) {
+            float bs = g_cfg.sparkBurst * tl;
+            if (bs < g_cfg.sparkBurstMin) bs = g_cfg.sparkBurstMin;
+            bs *= (0.5f + Rand01()) * sqrtf(hit);
+            float* vel = reinterpret_cast<float*>(P + 0x10);
+            for (int a = 0; a < 3; a++) vel[a] = cv[a] * g_cfg.sparkInherit + dir[a] / dl * bs;
+            float vl = sqrtf(Dot3(vel, vel));
+            float k = vl > 1e-3f ? bs / vl : 1.0f;              // (the tail: the burst's share of it)
+            *reinterpret_cast<float*>(P + 0x48) *= k < 0.05f ? 0.05f : k > 1.0f ? 1.0f : k;
+        }
+        *reinterpret_cast<float*>(P) *= g_cfg.sparkLife;
+    }
 }
 extern "C" void SparkSpawnStub();
 asm(".text\n"
@@ -3944,11 +4009,13 @@ static LONG g_sparkFloorSkipped = 0, g_sparkSideKept = 0, g_sparkImpactN = 0;
 static float g_sparkImpactMax = 0.0f, g_sparkImpactMin = 0.0f, g_sparkImpactSum = 0.0f;
 static void __attribute__((thiscall)) HkCollSparks(BYTE* self, BYTE* contact, BYTE* mover, float impact) {
     bool skip = false;
-    if (contact && mover && g_cfg.sparkFloor < 1.0f) {   // (the road filter)
-        float n[3] = { 0, 0, 0 };
+    float n[3] = { 0, 0, 0 }, nl = 0.0f;
+    if (contact && mover) {
         reinterpret_cast<ContactVec_t>(hot::fnContactVec)(contact, n, mover, 1);
+        nl = sqrtf(Dot3(n, n));
+    }
+    if (contact && mover && g_cfg.sparkFloor < 1.0f) {   // (the road filter)
         const float* up = reinterpret_cast<const float*>(mover + 0x10) + 4;   // the car's matrix, row 1
-        float nl = sqrtf(Dot3(n, n));
         if (nl > 1e-4f) {
             skip = fabsf(Dot3(n, up)) / nl > g_cfg.sparkFloor;
             (skip ? g_sparkFloorSkipped : g_sparkSideKept)++;
@@ -3967,11 +4034,14 @@ static void __attribute__((thiscall)) HkCollSparks(BYTE* self, BYTE* contact, BY
                  g_sparkImpactN, g_sparkImpactMin, g_sparkImpactSum / g_sparkImpactN, g_sparkImpactMax, g_cfg.sparkImpactRef);
     }
     g_sparkImpact = impact;
+    g_sparkMover = mover;
+    for (int a = 0; a < 3; a++) g_sparkN[a] = nl > 1e-4f ? n[a] / nl : 0.0f;
     reinterpret_cast<CollSparks_t>(hot::fnCollSparks)(self, contact, mover, impact);
     g_sparkImpact = 0.0f;
+    g_sparkMover = nullptr;
 }
 static void InstallSparks() {
-    if (g_cfg.sparkFloor < 1.0f || (g_cfg.sparkStreaks && g_cfg.sparkImpactRef > 0.0f)) {
+    if (g_cfg.sparkFloor < 1.0f || (g_cfg.sparkStreaks && (g_cfg.sparkImpactRef > 0.0f || g_cfg.sparkInherit > 0.0f))) {
         if (!PatchCall(hot::callCollSparks1, reinterpret_cast<void*>(&HkCollSparks), 5) ||
             !PatchCall(hot::callCollSparks2, reinterpret_cast<void*>(&HkCollSparks), 5)) Logf("sparks: road filter patch FAILED\n");
         else Logf("sparks: collision sparks hooked (road filter %.2f, size by hit strength / %.0f)\n", g_cfg.sparkFloor, g_cfg.sparkImpactRef);
@@ -3982,11 +4052,15 @@ static void InstallSparks() {
     DWORD a = reinterpret_cast<DWORD>(&g_sparkLength); memcpy(fld + 2, &a, 4);
     if (!PatchBytes(hot::sparkStreakLen, fld, 6) ||
          ((g_cfg.sparkVary > 0.0f || g_cfg.sparkHot > 0.0f || g_cfg.sparkCount > 0 ||
-           g_cfg.sparkImpactRef > 0.0f || g_cfg.sparkTwist > 0.0f) &&
+           g_cfg.sparkImpactRef > 0.0f || g_cfg.sparkTwist > 0.0f || g_cfg.sparkInherit > 0.0f) &&
          !PatchCall(hot::sparkSpawnEnd, reinterpret_cast<void*>(&SparkSpawnStub), 6))) { Logf("sparks: patch FAILED\n"); return; }
     Logf("sparks: dotted sparks drawn as streaks, %.2f s of travel long, x%.1f wide; size +-%.0f%%, hot %.2f; "
          "%d more a car-hit spark, %.0f/s at most (spread %.2f, up %.2f)\n", g_sparkLength, g_cfg.sparkWidth, g_cfg.sparkVary * 100.0f,
          g_cfg.sparkHot, g_cfg.sparkCount, g_cfg.sparkRate, g_cfg.sparkSpread, g_cfg.sparkUp);
+    if (g_cfg.sparkInherit > 0.0f)
+        Logf("sparks: collision sparks move with the car (x%.2f) and burst off the contact (x%.2f of the sliding, %.1f at least; "
+             "out %.2f, up %.2f), life x%.2f\n", g_cfg.sparkInherit, g_cfg.sparkBurst, g_cfg.sparkBurstMin, g_cfg.sparkOut,
+             g_cfg.sparkLift, g_cfg.sparkLife);
 }
 
 // ---------------------------------------------------------------------------
