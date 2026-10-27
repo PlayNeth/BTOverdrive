@@ -57,7 +57,7 @@
 
 #define MOD_NAME "Beat That! Overdrive"
 #define MOD_FILE "BTOverdrive"                   // .asi, .ini, logs, tuning file
-#define HWBT_VERSION "0.5.3-test12"
+#define HWBT_VERSION "0.5.3-test13"
 #define HWBT_BASE "HWBTFix 0.3.8"
 
 // ---------------------------------------------------------------------------
@@ -144,6 +144,7 @@ namespace hot {
     const DWORD callBlastHit   = 0x4A38F0;   // call 0x457C70 in an explosion's update (0x4A3610): each car in its reach, a hit of kind 1
                                              //   (a small push, 0x456290); here esi = the car, edi = the explosion (+0x2C centre, +0x10 reach squared)
     const DWORD fnTakeHit      = 0x457C70;
+    const DWORD carShadowFar   = 0x603D25;   // fadd qword [0x8A4268] (3.0): the car shadow projector's far plane = 10 + 3 + 1.4
     const DWORD musEndNoLoop   = 0x53B041;   // je (6 bytes): the music stream at its end, not set to loop - stop for good
     const DWORD vtSteerSetup   = 0x8C8F94;   // RaceCarSteering's vtable (0x8C8F3C) +0x58: its setup (0x6C6D30, thiscall): +0x74 how fast
                                              //   the wheels turn (0.96 rad/s, 0x8C8FC0), +0x78 the lock (+0x7C: 1.13 rad at most)
@@ -340,6 +341,7 @@ namespace hot {
         { vtSteerSetup,   "\x30\x6D\x6C\x00", 4 },                // -> 0x6C6D30
         { 0x6C6E12,       "\xD9\x05\xC0\x8F\x8C\x00\xD9\x5E\x74", 9 },   // fld [0x8C8FC0] / fstp [esi+0x74]
         { 0x53B03E,       "\x38\x46\x28\x0F\x84\xB5\x00\x00\x00", 9 },   // cmp [esi+0x28],al / je 0x53B0FC
+        { 0x603D1E,       "\xD9\x05\x80\x87\x93\x00\x51\xDC\x05\x68\x42\x8A\x00", 13 },   // fld [0x938780] / push ecx / fadd [0x8A4268]
         { fnTakeHit,      "\x83\xEC\x0C\x53\x8B\xD9\x80\xBB\xD4\x12\x00\x00\x00", 13 },
         { fnStuntStart,   "\x51\x53\x8B\x5C\x24\x0C\x56\x57\x8B\xF1\x33\xFF", 12 },
         { 0x4BAF1F,       "\x80\xBE\x8C\x03\x00\x00\x00", 7 },   // cmp byte [esi+0x38C],0: the roll's push and torque skipped when quiet
@@ -513,6 +515,7 @@ struct Config {
     float hazardFlyTime = 3.0f;          // a thrown car goes through walls for this long (seconds; 0 = never)
     int   hazardSmoke = 1;               // a burst of smoke on a car the hazard throws
     float steerRate = 2.5f;              // how fast the front wheels turn when you steer: x the game's (0.96 rad/s - over a second to full lock)
+    float carShadowDepth = 1.9f;         // how far below a car's middle its shadow reaches (game: 4.4 - through to a road below)
     int   aiUnstuck = 1;                 // an AI car that's been driving for 6 s without getting anywhere is put back on the track
     int   fallReset = 1;                 // any race car that falls off the track into the void is put back where it left it
     float hazardFallReset = 25.0f;       // a thrown car this far below where it was hit is put back on the track (0 = never)
@@ -787,6 +790,9 @@ static const char kIniText[] =
     ";   black hole at the top of the sky the wider view shows\n"
     "skyFar=20000\n"
     "skyStretch=1\n"
+    "; how far below a car's middle its shadow reaches (units): the game's 4.4 reached through the road\n"
+    ";   onto a road below (a car above you on a spiral cast its shadow on your road). 0 = the game's\n"
+    "carShadowDepth=1.9\n"
     "; see-through things (glass, glass road pieces): drawn back to front, and they don't hide what's\n"
     ";   drawn behind them afterward (they flickered between clear and washed out) (0 = the game's)\n"
     "glassSort=1\n"
@@ -1062,6 +1068,7 @@ static void LoadConfig() {
         else if (!_stricmp(key, "hazardFallReset"))    g_cfg.hazardFallReset = (float)atof(val);
         else if (!_stricmp(key, "fallReset"))          g_cfg.fallReset = n;
         else if (!_stricmp(key, "aiUnstuck"))          g_cfg.aiUnstuck = n;
+        else if (!_stricmp(key, "carShadowDepth"))     g_cfg.carShadowDepth = (float)atof(val);
         else if (!_stricmp(key, "steerRate"))          { float v = (float)atof(val); g_cfg.steerRate = v < 0.1f ? 0.1f : v > 10.0f ? 10.0f : v; }
     }
     fclose(f);
@@ -3372,6 +3379,22 @@ asm(".text\n"
     "    addl $8, %esp\n"
     "    popl %ecx\n"
     "    jmp *_g_blastMake\n");
+// Car shadows. Each car's shadow is a projector (0x602F40) set 10 units above
+// the middle of the car, looking down, from 9.5 to 10 + 3 + 1.4 units: down to
+// 4.4 below the car's middle, through its own road onto anything below (a car on
+// the spiral's next level shadowed the road under you). carShadowDepth sets how
+// far below the middle it reaches: the 3 (a shared constant, 0x8A4268) is read
+// from our own value instead.
+static double g_shadowFarAdd = 3.0;
+static void InstallCarShadowDepth() {
+    if (g_cfg.carShadowDepth <= 0.0f) return;
+    float d = g_cfg.carShadowDepth < 0.5f ? 0.5f : g_cfg.carShadowDepth;
+    g_shadowFarAdd = d - 1.4;
+    BYTE ins[6] = { 0xDC, 0x05 };                               // fadd qword ptr [&g_shadowFarAdd]
+    DWORD a = reinterpret_cast<DWORD>(&g_shadowFarAdd); memcpy(ins + 2, &a, 4);
+    Logf(PatchBytes(hot::carShadowFar, ins, 6) ? "shadows: car shadows reach %.1f below the car (game: 4.4)\n"
+                                                : "shadows: car shadow depth patch FAILED\n", d);
+}
 static void InstallWeaponImpact() {
     if (!g_cfg.weaponImpact) { Logf("weapons: the game's roll on a hit (weaponImpact=0)\n"); return; }
     if (!g_hzOn) { Logf("weapons: the game's roll on a hit (weaponImpact needs hazardHits=1)\n"); return; }
@@ -5470,6 +5493,7 @@ BOOL APIENTRY DllMain(HMODULE h, DWORD reason, LPVOID reserved) {
             InstallWeaponImpact();
             InstallFallReset();
             InstallAiUnstuck();
+            InstallCarShadowDepth();
             InstallSteering();
             InstallGrid();
             InstallStartBoost();
