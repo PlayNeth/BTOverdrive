@@ -57,7 +57,7 @@
 
 #define MOD_NAME "Beat That! Overdrive"
 #define MOD_FILE "BTOverdrive"                   // .asi, .ini, logs, tuning file
-#define HWBT_VERSION "0.5.3-test9"
+#define HWBT_VERSION "0.5.3-test11"
 #define HWBT_BASE "HWBTFix 0.3.8"
 
 // ---------------------------------------------------------------------------
@@ -548,6 +548,7 @@ struct Config {
     int   soundDoppler = 2;              // Doppler: 2 = from each sound's real movement, 1 = the game's (sources standing still), 0 = off
     float soundDopplerScale = 1.0f;      //   with 2: how strong (1 = real-world)
     float soundHeadroom = 3.0f;          // sound effects this many dB quieter, against clipping when many overlap
+    int   introCamClip = 1;              // the race intro's camera kept out of the scenery
     int   musicLoop = 1;                 // every song starts over at its end (the menus' didn't: silence once it was over)
     int   musicStream = 1;               // music streaming fixes (the "scratched disc" repeats)
     int   musicAtGo = 1;                 // race music starts at GO, after the countdown (as on the PS2)
@@ -708,6 +709,11 @@ static const char kIniText[] =
     ";   over a second from straight to full lock - the heavy, slow turn-in. The car's mass and inertia\n"
     ";   (BTOverdrive_tuning.txt) hardly change that. 1 = the game's\n"
     "steerRate=2.5\n"
+    "; --- intro camera ---\n"
+    "; the race intro's camera sweeps past the cars on the grid; with the cars side by side it can pass\n"
+    ";   through the scenery beside them. 1 = it's pulled in toward the nearest car when the scenery is\n"
+    ";   in the way (0 = as the game)\n"
+    "introCamClip=1\n"
     "; --- falling off ---\n"
     "; on every track, a race car (yours or the AI's) that falls off into the void is put back on the\n"
     ";   track where it left it, with the game's own put-back - the game's never found it a place from\n"
@@ -1014,6 +1020,7 @@ static void LoadConfig() {
         else if (!_stricmp(key, "soundHeadroom"))      g_cfg.soundHeadroom = (float)atof(val);
         else if (!_stricmp(key, "musicStream"))        g_cfg.musicStream = n;
         else if (!_stricmp(key, "musicLoop"))          g_cfg.musicLoop = n;
+        else if (!_stricmp(key, "introCamClip"))       g_cfg.introCamClip = n;
         else if (!_stricmp(key, "musicAtGo"))          g_cfg.musicAtGo = n;
         else if (!_stricmp(key, "scrapeSound"))        g_cfg.scrapeSound = n;
         else if (!_stricmp(key, "sparkStreaks"))       g_cfg.sparkStreaks = n;
@@ -1403,11 +1410,13 @@ extern "C" void __cdecl RegCar(BYTE* car) {          // per car, per step, at th
     if (!g_interpOn) return;
     if (Track* t = FindTrack(car, 1)) t->seenStep = g_stepsDone + 1;
 }
+static void IntroCamClip(BYTE* cam);
 static BYTE* g_applyCam = nullptr;                   // the camera Camera::Apply is setting up (speed FOV)
 extern "C" void __cdecl RegCam(BYTE* cam) {          // per camera, per frame
     g_applyCam = cam;
     if (!cam) return;
     if (!g_inRender) g_st.camOutside++;
+    else IntroCamClip(cam);                          // (as the frame's view is set up from it)
     if (Track* t = FindTrack(cam, 2)) t->seenFrame = g_frameNo;
 }
 // Vehicles drawn without physics (the car-select cars driving in and out are
@@ -1818,11 +1827,13 @@ static void __cdecl HkRender3D() {
 // reads many matrices only when it flushes, so the blend has to stay in until
 // then, not just through the 3D pass.
 static void CamShakeUndo();
+static void IntroCamClipUndo();
 static void __attribute__((thiscall)) HkFrameEnd(void* renderer) {
     LONGLONG pf0 = g_cfg.perfLog ? Qpc() : 0;
     reinterpret_cast<Limiter_t>(hot::fnFrameEnd)(renderer);
     if (pf0) g_pfCur[PF_PRESENT] += Qpc() - pf0;
     CamShakeUndo();                                // (before the check below: a shaken camera isn't "moved by the pass")
+    IntroCamClipUndo();
     if (!g_inRender) return;                       // no blend this frame
     g_inRender = false;
     for (Track& t : g_tr) {
@@ -2260,6 +2271,65 @@ static void CamShakeUndo() {
         g_shakeLogged = true;
         Logf("camera shake: %ld shakes in 600 frames, %ld camera setups outside drawing skipped\n", g_shakeDone, g_shakeOutside);
     }
+}
+// Intro camera (introCamClip). While a race intro is on (0x959F80), a camera
+// with a race car within 40 units is checked against the track (the game's line
+// test, 0x635580: from the car, 1 unit up, to the camera, both sides of every
+// triangle, its hit globals kept): scenery in between moves the camera in along
+// that line to just short of it (halving the line 8 times). Only for the frame:
+// the camera's own position is put back after the frame is drawn (the intro's
+// path goes on as it was).
+struct CamClipSave { BYTE* cam; float orig[3], moved[3]; };
+static CamClipSave g_camClip[4];
+static int g_camClipN = 0;
+static LONG g_camClipLogged = 0;
+static bool TrackBetween(const float* a, const float* b) {     // (game coordinates)
+    BYTE save[0x3C]; memcpy(save, reinterpret_cast<void*>(hot::lineHitGlobals), sizeof(save));
+    int mode = *reinterpret_cast<int*>(hot::lineSides);
+    *reinterpret_cast<int*>(hot::lineSides) = 2;
+    bool hit = reinterpret_cast<bool (__cdecl *)(const float*, const float*, void*)>(hot::fnLineCollide)(a, b, nullptr);
+    *reinterpret_cast<int*>(hot::lineSides) = mode;
+    memcpy(reinterpret_cast<void*>(hot::lineHitGlobals), save, sizeof(save));
+    return hit;
+}
+static void IntroCamClip(BYTE* cam) {
+    if (!g_cfg.introCamClip || !cam || !*reinterpret_cast<volatile BYTE*>(hot::introActive) || !g_interpOn) return;
+    for (int i = 0; i < g_camClipN; i++) if (g_camClip[i].cam == cam) return;   // (done this frame)
+    if (g_camClipN >= 4) return;
+    float* cp = reinterpret_cast<float*>(cam + 0x10) + 12;
+    const float* nearCar = nullptr; float best = 40.0f * 40.0f;
+    for (const Track& t : g_tr) {
+        if (!t.obj || t.kind != 1 || t.n != 2) continue;
+        DWORD vt = reinterpret_cast<DWORD>(t.vt);
+        if (vt != 0x8A0384 && vt != 0x8A0144 && vt != 0x8A3FA4) continue;
+        float d[3] = { t.cur[12] - cp[0], t.cur[13] - cp[1], t.cur[14] - cp[2] };
+        float dd = Dot3(d, d);
+        if (dd < best) { best = dd; nearCar = t.cur + 12; }
+    }
+    if (!nearCar) return;
+    float a[3] = { nearCar[0], nearCar[1] + 1.0f, nearCar[2] };
+    if (!TrackBetween(a, cp)) return;
+    float lo = 0.0f, hi = 1.0f;                                 // lo: free up to here
+    for (int i = 0; i < 8; i++) {
+        float m = (lo + hi) * 0.5f;
+        float p[3] = { a[0] + (cp[0] - a[0]) * m, a[1] + (cp[1] - a[1]) * m, a[2] + (cp[2] - a[2]) * m };
+        if (TrackBetween(a, p)) hi = m; else lo = m;
+    }
+    float k = lo * 0.9f;
+    if (k < 0.15f) return;                                      // (the car itself in the scenery: leave it)
+    CamClipSave& e = g_camClip[g_camClipN++];
+    e.cam = cam; memcpy(e.orig, cp, 12);
+    for (int i = 0; i < 3; i++) cp[i] = a[i] + (cp[i] - a[i]) * k;
+    memcpy(e.moved, cp, 12);
+    if (InterlockedIncrement(&g_camClipLogged) <= 10)
+        Logf("intro camera: %p was in the scenery - moved in to %.0f%% of the way from the car\n", cam, k * 100.0f);
+}
+static void IntroCamClipUndo() {                                // after the frame
+    for (int i = 0; i < g_camClipN; i++) {
+        float* cp = reinterpret_cast<float*>(g_camClip[i].cam + 0x10) + 12;
+        if (!memcmp(cp, g_camClip[i].moved, 12)) memcpy(cp, g_camClip[i].orig, 12);   // (unless something else moved it since)
+    }
+    g_camClipN = 0;
 }
 struct CamFov { BYTE* cam; float speed; LONGLONG qpc; float fovPrev, fovCur; LONG fovStep; };
 static CamFov g_camFov[8];
@@ -3531,6 +3601,66 @@ static int GameMode() {
 }
 static bool RampageSpawn(BYTE* car, const float* pos, const float* mat, int a3, float a4, int a5);
 static void SparkSetup();
+// Narrow starts: the grid is fitted to the track. Some start lines run between
+// scenery (walls, pillars, props of the track) with no room for gridColumns
+// abreast: the outer cars started in it, and the intro camera swept through it.
+// Along the grid's length, the room either side of the start line is measured
+// with the game's line test against the track (from 1.5 up, out to 25 units,
+// the nearest of a few points along each row); the grid is moved sideways into
+// the middle of that room and given as many columns as fit, gridWidth apart
+// (down to 5.5 apart), with 3 units to spare beside the outer cars - single file
+// if two don't fit. Worked out once per race.
+static bool TrackBetween(const float* a, const float* b);
+static void GridFit(const float* fp, const float* ah, const float* rt, int n, int& cols, float& width, float& shift) {
+    static const float* lastFp = nullptr; static DWORD lastMs = 0;
+    static int fitCols = 1; static float fitWidth = 0.0f, fitShift = 0.0f;
+    DWORD now = GetTickCount();
+    if (fp == lastFp && now - lastMs < 10000) { cols = fitCols < cols ? fitCols : cols; width = fitWidth; shift = fitShift; return; }
+    const float reach = 25.0f, margin = 3.0f;
+    float minL = reach, minR = reach;
+    int rows = (n + cols - 1) / cols;
+    float length = (rows - 1) * g_cfg.gridRowGap + (cols - 1) * g_cfg.gridStagger;
+    for (int i = 0; i <= 4; i++) {                              // points along the grid's length
+        float back = length * i / 4.0f;
+        float c[3] = { fp[0] - ah[0] * back, fp[1] + 1.5f, fp[2] - ah[2] * back };
+        for (int side = 0; side < 2; side++) {
+            float sg = side ? 1.0f : -1.0f;
+            float e[3] = { c[0] + rt[0] * reach * sg, c[1], c[2] + rt[2] * reach * sg };
+            float free = reach;
+            if (TrackBetween(c, e)) {
+                float lo = 0.0f, hi = 1.0f;
+                for (int k = 0; k < 8; k++) {
+                    float m = (lo + hi) * 0.5f;
+                    float p[3] = { c[0] + (e[0] - c[0]) * m, c[1], c[2] + (e[2] - c[2]) * m };
+                    if (TrackBetween(c, p)) hi = m; else lo = m;
+                }
+                free = reach * lo;
+            }
+            float& mn = side ? minR : minL;
+            if (free < mn) mn = free;
+        }
+    }
+    float room = minL + minR - 2.0f * margin;                   // centre to centre of the outer cars
+    int want = cols;
+    float w = g_cfg.gridWidth;
+    int c = want;
+    while (c > 1 && (c - 1) * w > room) {
+        float squeezed = room / (c - 1);
+        if (squeezed >= 5.5f) { w = squeezed; break; }
+        c--;
+    }
+    fitCols = c; fitWidth = w;
+    fitShift = (minR - minL) * 0.5f;                            // the middle of the room
+    float half = (c - 1) * w * 0.5f;
+    float lim = minR - margin - half, limL = -(minL - margin - half);   // (keep the outer cars clear)
+    if (fitShift > lim) fitShift = lim;
+    if (fitShift < limL) fitShift = limL;
+    if (lim < limL) fitShift = 0.0f;
+    lastFp = fp; lastMs = now;
+    Logf("grid: room beside the start line %.1f left, %.1f right: %d abreast, %.1f apart, moved %.1f %s\n",
+         minL, minR, c, w, fabsf(fitShift), fitShift >= 0.0f ? "right" : "left");
+    cols = c < cols ? c : cols; width = fitWidth; shift = fitShift;
+}
 static void __attribute__((thiscall)) HkGridPlace(BYTE* car, const float* pos, const float* mat, int a3, float a4, int a5) {
     SparkSetup();
     int mode = GameMode();
@@ -3568,10 +3698,12 @@ static void __attribute__((thiscall)) HkGridPlace(BYTE* car, const float* pos, c
     bool slot0Front = p0[0] * ah[0] + p0[2] * ah[2] >= pn[0] * ah[0] + pn[2] * ah[2];
     int rank = slot0Front ? slot : n - 1 - slot;                // 0 = pole
     int cols = g_cfg.gridColumns < 1 ? 1 : g_cfg.gridColumns > 8 ? 8 : g_cfg.gridColumns;
-    int row = rank / cols, col = rank % cols;
-    float across = (col - (cols - 1) * 0.5f) * g_cfg.gridWidth;
-    float back = row * g_cfg.gridRowGap + col * g_cfg.gridStagger;   // each car further right, further back
     const float* fp = reinterpret_cast<const float*>(front + 0x40);
+    float width = g_cfg.gridWidth, shift = 0.0f;
+    GridFit(fp, ah, rt, n, cols, width, shift);
+    int row = rank / cols, col = rank % cols;
+    float across = shift + (col - (cols - 1) * 0.5f) * width;
+    float back = row * g_cfg.gridRowGap + col * g_cfg.gridStagger;   // each car further right, further back
     float np[3] = { fp[0] + rt[0] * across - ah[0] * back, fp[1], fp[2] + rt[2] * across - ah[2] * back };
     Logf("grid: slot %d -> row %d column %d (%.1f %.1f %.1f)\n", slot, row, col, np[0], np[1], np[2]);
     reinterpret_cast<PlaceCar_t>(hot::fnPlaceCar)(car, np, reinterpret_cast<const float*>(front + 0x10), a3, a4, a5);
