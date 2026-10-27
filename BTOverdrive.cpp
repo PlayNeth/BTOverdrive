@@ -57,7 +57,7 @@
 
 #define MOD_NAME "Beat That! Overdrive"
 #define MOD_FILE "BTOverdrive"                   // .asi, .ini, logs, tuning file
-#define HWBT_VERSION "0.5.3-test21"
+#define HWBT_VERSION "0.5.3-test22"
 #define HWBT_BASE "HWBTFix 0.3.8"
 
 // ---------------------------------------------------------------------------
@@ -146,6 +146,14 @@ namespace hot {
     const DWORD fnTakeHit      = 0x457C70;
     const DWORD callIceHit     = 0x4A341B;   // call 0x478E40 (freeze, thiscall car+0x1360): the upgraded ice gun's shot hit a car
     const DWORD callIceFull    = 0x4790C7;   // call 0x478E40 in the freeze update (0x479050): the ice built up to 10 (the plain ice gun)
+    const DWORD callMslTarget  = 0x473749;   // call 0x473370 in a missile's flight (0x473630): pick its target (+0x40 a car ahead;
+                                             //   homing, +0x1F6: +0x1F8 a racer's track follower)
+    const DWORD callShieldOn   = 0x49D65B;   // call 0x4A7D20 in a shield's start (0x49D5D0): car+0x12B0 on (time, radius, mega, hits, 1)
+    const DWORD vtSmokeUpd     = 0x8AACDC;   // GSAmmoSmoke's vtable (0x8AACB4) +0x28: its update (0x49DA50, while pouring out)
+    const DWORD vtSmokeFlUpd   = 0x8AAD44;   // GSAmmoSmokeFlash's (0x8AAD1C) +0x28
+    const DWORD vtParaLaunch   = 0x8AAEBC;   // GSAmmoParachute's (0x8AAEA4) +0x18: launch (0x4710D0, thiscall firer, ?)
+    const DWORD vtEmpFire      = 0x8AAFB4;   // GSAmmoEMP's (0x8AAFAC) +0x8: set off (0x49EEA0)
+    const DWORD vtEmpUpFire    = 0x8AB01C;   // GSAmmoEMPUpgrade's (0x8AB014) +0x8
     const DWORD callWeaponRoll = 0x4620BC;   // call 0x4C3360: a crate's item (thiscall table; position 1.., cars, roll, blue)
     const DWORD carShadowFar   = 0x603D25;   // fadd qword [0x8A4268] (3.0): the car shadow projector's far plane = 10 + 3 + 1.4
     const DWORD musEndNoLoop   = 0x53B041;   // je (6 bytes): the music stream at its end, not set to loop - stop for good
@@ -465,6 +473,13 @@ namespace hot {
         { fnSetAngVel,    "\x8B\x54\x24\x04\x56\x8B\x32", 7 },       // mov edx,[esp+4] / push esi / mov esi,[edx]
         { callIceHit,     "\xE8\x20\x5A\xFD\xFF", 5 },               // call 0x478E40
         { callIceFull,    "\xE8\x74\xFD\xFF\xFF", 5 },               // call 0x478E40
+        { callMslTarget,  "\xE8\x22\xFC\xFF\xFF", 5 },               // call 0x473370
+        { callShieldOn,   "\xE8\xC0\xA6\x00\x00", 5 },               // call 0x4A7D20
+        { vtSmokeUpd,     "\x50\xDA\x49\x00", 4 },                   // 0x49DA50
+        { vtSmokeFlUpd,   "\x50\xDA\x49\x00", 4 },
+        { vtParaLaunch,   "\xD0\x10\x47\x00", 4 },                   // 0x4710D0
+        { vtEmpFire,      "\xA0\xEE\x49\x00", 4 },                   // 0x49EEA0
+        { vtEmpUpFire,    "\xA0\xEE\x49\x00", 4 },
     };
 }
 
@@ -526,6 +541,14 @@ struct Config {
     int   itemOdds = 1;                  // what a crate gives by race position (itemsFirst/Front/Mid/Back); 0 = the game's table
     int   aiUnstuck = 1;
     float aiLoopSpeed = 50.0f;           // an AI car on a loop's wall or ceiling keeps at least this speed (units/s; 0 = off)
+    int   smokeHide = 1;                 // while a car's smoke is pouring out, guided rockets and parachutes can't lock on to it
+    int   parachuteHoming = 1;           // the plain parachute homes in like the homing rocket
+    float shieldTime = 1.5f;             // the shield lasts this many times as long (the mega shield: megaShieldTime)
+    float megaShieldTime = 1.75f;
+    int   shieldZap = 1;                 // a car touching a shield is slowed (the parachute's slow) for shieldSlow s; a mega shield's also loses its steering
+    float shieldSlow = 2.0f;
+    float shieldLock = 2.0f;             //   for this long
+    float empSlow = 2.5f;                // the EMP also slows every other car (as the tesla ray does) for this long (s; 0 = no)
     int   iceFix = 1;                    // the ice gun: no freezing a frozen car again, a moment free after breaking out, the AI frozen too
     int   physLog = 1;                   // (test builds) your car's physics on loops and waves to BTOverdrive_physics.csv                 // an AI car that's been driving for 6 s without getting anywhere is put back on the track
     int   fallReset = 1;                 // any race car that falls off the track into the void is put back where it left it
@@ -741,10 +764,6 @@ static const char kIniText[] =
     ";   loop's wall or ceiling (tilted over 60 degrees, on the road) keeps at least this speed (units/s;\n"
     ";   cars race at about 50-75) - 0 = as the game\n"
     "aiLoopSpeed=50\n"
-    "; the ice gun: a frozen car isn't frozen again on top (each shot restarted it), a car that's just\n"
-    ";   broken out is free for a second, its steering always comes back with the ice, and a frozen AI\n"
-    ";   car can't steer either (it drove on as if nothing happened) - 0 = as the game\n"
-    "iceFix=1\n"
     "; --- items ---\n"
     "; what a crate gives, by race position (as in Mario Kart: the leader gets defence, the back of the\n"
     ";   pack the big weapons): 1st, the front (top third), the middle, the back (the last two). Each\n"
@@ -756,6 +775,24 @@ static const char kIniText[] =
     "itemsFront=rocket:25, mine:15, shield:15, mortar:12, parachute:10, icegun:10, boost:8, tesla:5\n"
     "itemsMid=rocket:18, mortar:15, parachute:15, icegun:12, boost:12, tesla:10, airstrike:8, mine:5, smoke:5\n"
     "itemsBack=tesla:22, airstrike:20, boost:18, parachute:12, mortar:10, icegun:10, emp:4\n"
+    "; the ice gun: a frozen car isn't frozen again on top (each shot restarted it), a car that's just\n"
+    ";   broken out is free for a second, its steering always comes back with the ice, and a frozen AI\n"
+    ";   car can't steer either (it drove on as if nothing happened) - 0 = as the game\n"
+    "iceFix=1\n"
+    "; while a car's smoke is pouring out, homing rockets and parachutes can't lock on to it (0 = they can)\n"
+    "smokeHide=1\n"
+    "; the plain parachute homes in on its target like the homing rocket (0 = it flies straight)\n"
+    "parachuteHoming=1\n"
+    "; the shield lasts this many times as long as the game's; the mega shield megaShieldTime\n"
+    "shieldTime=1.5\n"
+    "megaShieldTime=1.75\n"
+    "; a car that touches a shield gets a shock: slowed down like a parachute's for shieldSlow seconds -\n"
+    ";   and a mega shield's also can't steer for shieldLock seconds (0 = the game's shield)\n"
+    "shieldZap=1\n"
+    "shieldSlow=2\n"
+    "shieldLock=2\n"
+    "; the EMP also slows every other car down (as the tesla ray does) for this many seconds (0 = no)\n"
+    "empSlow=2.5\n"
     "; --- weapon hits ---\n"
     "; weapon hits throw the car instead of the game's roll on the spot. A mine, airstrike bomb or\n"
     ";   parachute bomb throws it weaponPush units/s away from the blast and weaponLift up, tumbling\n"
@@ -1105,6 +1142,14 @@ static void LoadConfig() {
         else if (!_stricmp(key, "itemOdds"))           g_cfg.itemOdds = n;
         else if (!_stricmp(key, "aiLoopSpeed"))        g_cfg.aiLoopSpeed = (float)atof(val);
         else if (!_stricmp(key, "iceFix"))             g_cfg.iceFix = n;
+        else if (!_stricmp(key, "smokeHide"))          g_cfg.smokeHide = n;
+        else if (!_stricmp(key, "parachuteHoming"))    g_cfg.parachuteHoming = n;
+        else if (!_stricmp(key, "shieldTime"))         g_cfg.shieldTime = (float)atof(val);
+        else if (!_stricmp(key, "megaShieldTime"))     g_cfg.megaShieldTime = (float)atof(val);
+        else if (!_stricmp(key, "shieldZap"))          g_cfg.shieldZap = n;
+        else if (!_stricmp(key, "shieldSlow"))         g_cfg.shieldSlow = (float)atof(val);
+        else if (!_stricmp(key, "shieldLock"))         g_cfg.shieldLock = (float)atof(val);
+        else if (!_stricmp(key, "empSlow"))            g_cfg.empSlow = (float)atof(val);
         else if (!_stricmp(key, "physLog"))            g_cfg.physLog = n;
         else if (!_stricmp(key, "carShadowDepth"))     g_cfg.carShadowDepth = (float)atof(val);
         else if (!_stricmp(key, "steerRate"))          { float v = (float)atof(val); g_cfg.steerRate = v < 0.1f ? 0.1f : v > 10.0f ? 10.0f : v; }
@@ -1457,7 +1502,7 @@ static void PhysLogStep(BYTE* car);
 static void AiStuckTrack(BYTE* car);
 static void AiLoopAssist(BYTE* car);
 static void IceTrack(BYTE* car);
-static bool g_iceOn = false;
+static bool g_carFxOn = false;                       // IceTrack: the ice gun fix, a mega shield's lock, the shield's shock
 static bool g_sndStepHooked = false;                  // the sound update (once per step) is hooked: HkSndUpdate
 static void FallTrack(BYTE* car);
 extern "C" void __cdecl RegCar(BYTE* car) {          // per car, per step, at the start of its physics sync
@@ -1466,7 +1511,7 @@ extern "C" void __cdecl RegCar(BYTE* car) {          // per car, per step, at th
     if (g_fallOn) FallTrack(car);
     if (g_aiStuckOn) AiStuckTrack(car);
     if (g_cfg.aiLoopSpeed > 0.0f) AiLoopAssist(car);
-    if (g_iceOn) IceTrack(car);
+    if (g_carFxOn) IceTrack(car);
     if (g_physLog) PhysLogStep(car);
     if (!g_interpOn) return;
     if (Track* t = FindTrack(car, 1)) t->seenStep = g_stepsDone + 1;
@@ -3353,7 +3398,8 @@ static void AiLoopAssist(BYTE* car) {                           // from RegCar, 
 // went (and not since put up by anything else) is taken down; and a frozen AI
 // car's turning (its spin about its own up) is held at nothing each step.
 // ---------------------------------------------------------------------------
-struct IceSeen { BYTE* car; bool frozen; bool lock; DWORD frozeMs, endMs, lockMs, seenMs; bool leftover; };
+struct IceSeen { BYTE* car; bool frozen; bool lock; DWORD frozeMs, endMs, lockMs, seenMs; bool leftover;
+                 DWORD lockUntil; bool ourLock; DWORD zapMs; };       // (a mega shield's lock on it; its last shock)
 static IceSeen g_ice[16];
 static LONG g_iceLogged = 0;
 static IceSeen* IceFind(BYTE* car, bool add) {
@@ -3388,6 +3434,7 @@ static void __attribute__((thiscall)) HkIceStart(BYTE* frz) {   // replaces the 
     }
     reinterpret_cast<Fn>(0x478E40)(frz);
 }
+static void ItemFxStep(BYTE* car, IceSeen* e, DWORD now);
 static void IceTrack(BYTE* car) {                               // from RegCar, once per car per step
     DWORD vt = *reinterpret_cast<DWORD*>(car);
     if (vt != 0x8A0384 && vt != 0x8A0144 && vt != 0x8A3FA4) return;   // race cars only
@@ -3398,40 +3445,266 @@ static void IceTrack(BYTE* car) {                               // from RegCar, 
     e->seenMs = now;
     bool frozen = car[0x1360 + 0x1C] != 0;
     bool lock = ctl[0x364] != 0;
+    bool ours = e->lockUntil && (LONG)(now - e->lockUntil) < 0;  // (a mega shield's lock still on)
     if (frozen && !e->frozen) {
         e->frozeMs = now;
         IceLog(car, "frozen by car %p", *reinterpret_cast<void**>(car + 0x1364));
     } else if (!frozen && e->frozen) {
         e->endMs = now;
-        e->leftover = lock;                                     // (the flag outlasting the ice)
+        e->leftover = lock && !ours;                            // (the flag outlasting the ice)
         IceLog(car, "thawed after %lu ms%s", now - e->frozeMs, lock ? " - its steering still locked" : "");
     }
     if (lock && !e->lock) e->lockMs = now;
-    if (!lock) e->leftover = false;
+    if (!lock || ours) e->leftover = false;
     else if (!frozen && e->lockMs > e->endMs) e->leftover = false;   // (put up again since: the tesla's)
-    if (e->leftover && now - e->endMs > 250) {
+    if (g_cfg.iceFix && e->leftover && now - e->endMs > 250) {
         ctl[0x364] = 0; lock = false; e->leftover = false;
         IceLog(car, "steering still locked %lu ms after the ice went: unlocked", now - e->endMs);
     }
+    // a mega shield's lock: the flag held up, then taken down (unless the ice has it)
+    if (ours) { ctl[0x364] = 1; lock = true; e->ourLock = true; }
+    else if (e->lockUntil) {
+        if (e->ourLock && !frozen) { ctl[0x364] = 0; lock = false; }
+        e->lockUntil = 0; e->ourLock = false;
+    }
     e->frozen = frozen; e->lock = lock;
-    // a frozen AI car: no turning (the controller's flag only stops a driver's stick)
-    if (frozen && vt == 0x8A0144) {                             // (GSAIRaceCar_c)
+    // a locked AI car: no turning (the controller's flag only stops a driver's stick)
+    if (((frozen && g_cfg.iceFix) || ours) && vt == 0x8A0144) {   // (GSAIRaceCar_c)
         const float* m = reinterpret_cast<const float*>(car + 0x10);
         const float* up = m + 4;
         const float* w = reinterpret_cast<const float*>(car + 0x26C);
-        float s = Dot3(w, up);
-        if (s > 0.02f || s < -0.02f) {
-            float nw[3] = { w[0] - up[0] * s, w[1] - up[1] * s, w[2] - up[2] * s };
+        float sp = Dot3(w, up);
+        if (sp > 0.02f || sp < -0.02f) {
+            float nw[3] = { w[0] - up[0] * sp, w[1] - up[1] * sp, w[2] - up[2] * sp };
             reinterpret_cast<SetVec_t>(hot::fnSetAngVel)(car, nw);
         }
     }
+    ItemFxStep(car, e, now);
 }
 static void InstallIceFix() {
     if (!g_cfg.iceFix) { Logf("ice gun: as the game (iceFix=0)\n"); return; }
     if (!InstallCarSync() || !PatchCall(hot::callIceHit, reinterpret_cast<void*>(&HkIceStart), 5) ||
         !PatchCall(hot::callIceFull, reinterpret_cast<void*>(&HkIceStart), 5)) { Logf("ice gun: patch FAILED\n"); return; }
-    g_iceOn = true;
+    g_carFxOn = true;
     Logf("ice gun: no refreezing a frozen car, a second free after breaking out, frozen AI can't steer\n");
+}
+// ---------------------------------------------------------------------------
+// Items. The race cars: 8 slots at 0x953C90, each +0x10 its car (as the
+// missile's aim walks them, 0x471350). A slow-down is the parachute's and the
+// tesla ray's hit: kind 4 (0x457C70: car+0x1330 its timer = +0x2C seconds, the
+// controller's +0x2D8 = +0x28 - the parachute 40, the tesla ray 15), set to
+// pass the just-hit check (+0x21) and leave none of its own (+0x24 = 0, so the
+// next rocket still lands). A shielded car (+0x12D4) is passed over, as always.
+//
+// Smoke (smokeHide). A missile picks its target each step of its flight (call
+// 0x473370 from 0x473630): a car ahead (+0x40, steered at when +0x1F7), or for
+// a homing one (+0x1F6) one of the racers' track followers (+0x1F8: [it]+4 its
+// car). A car whose smoke (GSAmmoSmoke / SmokeFlash, +0x44 the car; its update,
+// vtable +0x28, runs while it pours out) poured out in the last 0.4 s is taken
+// off either: the missile flies on straight.
+//
+// Parachute (parachuteHoming): the plain parachute is a missile with neither
+// flag (the big parachute has both); it's launched with both, as the homing
+// rocket is - the launch (0x4710D0) takes the homing off again for an AI's, as
+// it does the homing rocket's.
+//
+// Shields: the time (car's +0x1340 x 1.4) times shieldTime / megaShieldTime
+// (car+0x12B0 on, 0x4A7D20: +0x28 its radius, 5; +0x30 mega). shieldZap: a
+// race car within the radius + 1 of a shielded car is shocked - the tesla
+// ray's sparks on it for a second (GSTeslaParams 0x4F3FA0, +0x40 the car, +0x7E
+// the super ray's look; 0x42C6E0 makes it, 0x428B00 ends it) - and slowed for
+// shieldSlow s (the parachute's slow; the tesla ray's sound), a mega shield's
+// unable to steer for shieldLock s; again only after 3 s.
+//
+// EMP (empSlow): once set off (vtable +0x8, 0x49EEA0), every other race car is
+// slowed (the tesla ray's slow) for empSlow s.
+// ---------------------------------------------------------------------------
+typedef void (__attribute__((thiscall)) *ThisFn_t)(BYTE*);
+static BYTE* RaceCarAt(int i) {
+    BYTE* slot = reinterpret_cast<BYTE**>(0x953C90)[i];
+    if (!slot) return nullptr;
+    BYTE* car = *reinterpret_cast<BYTE**>(slot + 0x10);
+    if (!car) return nullptr;
+    DWORD vt = *reinterpret_cast<DWORD*>(car);
+    if (vt != 0x8A0384 && vt != 0x8A0144 && vt != 0x8A3FA4) return nullptr;
+    return car;
+}
+static void SlowHit(BYTE* car, float factor, float secs, DWORD weapon, DWORD sound) {
+    alignas(4) BYTE hit[0x40] = {};
+    reinterpret_cast<ThisFn_t>(0x497190)(hit);                  // (its defaults)
+    *reinterpret_cast<int*>(hit + 0x10) = 4;                    // slow down
+    *reinterpret_cast<DWORD*>(hit + 0x14) = weapon;
+    *reinterpret_cast<DWORD*>(hit + 0x1C) = sound;              // (0: none)
+    hit[0x20] = 0;
+    hit[0x21] = 1;                                              // (not passed over for a hit a moment ago)
+    *reinterpret_cast<float*>(hit + 0x24) = 0.0f;               // (and no "just hit" of its own)
+    *reinterpret_cast<float*>(hit + 0x28) = factor;
+    *reinterpret_cast<float*>(hit + 0x2C) = secs;
+    reinterpret_cast<void (__attribute__((thiscall)) *)(BYTE*, BYTE*)>(hot::fnTakeHit)(car, hit);
+}
+static LONG g_itemFxLogged = 0;
+#define ITEMLOG(...) do { if (InterlockedIncrement(&g_itemFxLogged) <= 80) Logf(__VA_ARGS__); } while (0)
+static const char* CarTag(const BYTE* car) {
+    DWORD vt = *reinterpret_cast<const DWORD*>(car);
+    return vt == 0x8A0384 ? " (you)" : vt == 0x8A0144 ? " (AI)" : "";
+}
+// smoke
+struct SmokeSeen { BYTE* car; DWORD ms; };
+static SmokeSeen g_smoke[8];
+static bool Smoked(const BYTE* car) {
+    if (!car) return false;
+    DWORD now = GetTickCount();
+    for (const SmokeSeen& x : g_smoke) if (x.car == car && now - x.ms < 400) return true;
+    return false;
+}
+typedef bool (__attribute__((thiscall)) *AmmoUpd_t)(BYTE*);
+static bool __attribute__((thiscall)) HkSmokeUpd(BYTE* ammo) {
+    BYTE* car = *reinterpret_cast<BYTE**>(ammo + 0x44);
+    if (car) {
+        DWORD now = GetTickCount();
+        SmokeSeen* slot = &g_smoke[0];
+        for (SmokeSeen& x : g_smoke) { if (x.car == car) { slot = &x; break; } if (now - x.ms > now - slot->ms) slot = &x; }
+        if (slot->car != car || now - slot->ms >= 400) ITEMLOG("smoke: car %p%s pouring out smoke - hidden from homing\n", car, CarTag(car));
+        slot->car = car; slot->ms = now;
+    }
+    return reinterpret_cast<AmmoUpd_t>(0x49DA50)(ammo);
+}
+struct FollowerCar { BYTE* f; BYTE* car; };
+static FollowerCar g_followers[32];
+static int g_followerNext = 0;
+static BYTE* FollowerCarOf(BYTE* f, bool fresh) {             // (fresh: just picked by the game, so readable now)
+    if (fresh) {
+        BYTE* a = *reinterpret_cast<BYTE**>(f);
+        BYTE* car = a ? *reinterpret_cast<BYTE**>(a + 4) : nullptr;
+        for (FollowerCar& x : g_followers) if (x.f == f) { x.car = car; return car; }
+        g_followers[g_followerNext] = { f, car };
+        g_followerNext = (g_followerNext + 1) & 31;
+        return car;
+    }
+    for (const FollowerCar& x : g_followers) if (x.f == f) return x.car;
+    return nullptr;
+}
+static void __attribute__((thiscall)) HkMslTarget(BYTE* m) {   // replaces call 0x473370 at 0x473749
+    BYTE** tgt = reinterpret_cast<BYTE**>(m + 0x40);
+    BYTE** fol = reinterpret_cast<BYTE**>(m + 0x1F8);
+    if (Smoked(*tgt)) *tgt = nullptr;
+    BYTE* before = *fol;
+    static BYTE* logged = nullptr;                              // (a missile's lost target: logged once, not each step)
+    reinterpret_cast<ThisFn_t>(0x473370)(m);
+    if (Smoked(*tgt)) {
+        if (logged != m) ITEMLOG("smoke: missile %p lost car %p%s in the smoke\n", m, *tgt, CarTag(*tgt));
+        *tgt = nullptr;
+        logged = m;
+    }
+    if (*fol) {
+        BYTE* car = FollowerCarOf(*fol, *fol != before);
+        if (Smoked(car)) {
+            if (logged != m) ITEMLOG("smoke: homing missile %p lost car %p%s in the smoke\n", m, car, CarTag(car));
+            *fol = nullptr;
+            logged = m;
+        }
+    }
+}
+// parachute
+typedef void (__attribute__((thiscall)) *Launch_t)(BYTE*, DWORD, DWORD);
+static void __attribute__((thiscall)) HkParaLaunch(BYTE* ammo, DWORD a, DWORD b) {
+    ammo[0x1F6] = 1;                                            // homing
+    ammo[0x1F7] = 1;                                            // steered
+    reinterpret_cast<Launch_t>(0x4710D0)(ammo, a, b);
+}
+// shields
+typedef void (__attribute__((thiscall)) *ShieldOn_t)(BYTE*, float, float, int, int, int);
+static void __attribute__((thiscall)) HkShieldOn(BYTE* sh, float secs, float radius, int mega, int hits, int one) {
+    float k = (mega & 0xFF) ? g_cfg.megaShieldTime : g_cfg.shieldTime;
+    if (k <= 0.0f) k = 1.0f;
+    BYTE* car = sh - 0x12B0;
+    ITEMLOG("shield: car %p%s %s shield up for %.1f s (the game's %.1f)\n", car, CarTag(car), (mega & 0xFF) ? "mega" : "plain", secs * k, secs);
+    reinterpret_cast<ShieldOn_t>(0x4A7D20)(sh, secs * k, radius, mega, hits, one);
+}
+struct Shock { int fx; DWORD endMs; };
+static Shock g_shocks[8];
+static void ShockFx(BYTE* car, bool super) {
+    alignas(8) BYTE prm[0x100] = {};
+    reinterpret_cast<ThisFn_t>(0x4F3FA0)(prm);                  // GSTeslaParams
+    *reinterpret_cast<BYTE**>(prm + 0x40) = car;
+    prm[0x7E] = super ? 1 : 0;
+    int fx = reinterpret_cast<int (__cdecl *)(BYTE*, int, int)>(0x42C6E0)(prm, -1, 0);
+    if (fx == -1) return;
+    DWORD now = GetTickCount();
+    Shock* slot = &g_shocks[0];
+    for (Shock& x : g_shocks) { if (!x.endMs) { slot = &x; break; } if ((LONG)(x.endMs - slot->endMs) < 0) slot = &x; }
+    if (slot->endMs) reinterpret_cast<void (__cdecl *)(int, int)>(0x428B00)(slot->fx, 0);   // (out of room: the oldest ends now)
+    slot->fx = fx; slot->endMs = now + 1000;
+}
+static void ShockEnds(DWORD now) {
+    for (Shock& x : g_shocks)
+        if (x.endMs && (LONG)(now - x.endMs) >= 0) { reinterpret_cast<void (__cdecl *)(int, int)>(0x428B00)(x.fx, 0); x.endMs = 0; }
+}
+static void ItemFxStep(BYTE* car, IceSeen*, DWORD now) {        // from IceTrack, once per car per step
+    ShockEnds(now);
+    if (!g_cfg.shieldZap || !car[0x12D4]) return;               // (no shield up)
+    float radius = *reinterpret_cast<const float*>(car + 0x12D8) + 1.0f;
+    bool mega = car[0x12E0] != 0;
+    const float* p = reinterpret_cast<const float*>(car + 0x40);
+    for (int i = 0; i < 8; i++) {
+        BYTE* o = RaceCarAt(i);
+        if (!o || o == car || o[0x12D4]) continue;
+        const float* q = reinterpret_cast<const float*>(o + 0x40);
+        float d[3] = { q[0] - p[0], q[1] - p[1], q[2] - p[2] };
+        float dist = sqrtf(Dot3(d, d));
+        if (dist >= radius) continue;
+        IceSeen* v = IceFind(o, true);
+        if (v->zapMs && now - v->zapMs < 3000) continue;
+        v->zapMs = now;
+        v->seenMs = now;
+        SlowHit(o, *reinterpret_cast<const float*>(0x8AAE6C), g_cfg.shieldSlow, mega ? 0xFB7 : 0xFAB, 5);   // (the parachute's slow; the tesla's sound)
+        if (mega && g_cfg.shieldLock > 0.0f) v->lockUntil = now + (DWORD)(g_cfg.shieldLock * 1000.0f);
+        ShockFx(o, mega);
+        ITEMLOG("shield: car %p%s touched car %p%s's %s shield (%.1f apart): shocked, slowed for %.1f s%s\n", o, CarTag(o), car, CarTag(car),
+                mega ? "mega" : "plain", dist, g_cfg.shieldSlow, mega ? ", no steering" : "");
+    }
+}
+// EMP
+static void __attribute__((thiscall)) HkEmpFire(BYTE* ammo) {
+    reinterpret_cast<ThisFn_t>(0x49EEA0)(ammo);
+    BYTE* by = *reinterpret_cast<BYTE**>(ammo + 0x44);
+    if (!by || g_cfg.empSlow <= 0.0f) return;
+    int n = 0;
+    for (int i = 0; i < 8; i++) {
+        BYTE* o = RaceCarAt(i);
+        if (!o || o == by || o[0x12D4]) continue;
+        SlowHit(o, *reinterpret_cast<const float*>(0x8AAD84), g_cfg.empSlow, *reinterpret_cast<DWORD*>(ammo + 0x4C), 0);   // (the tesla ray's slow)
+        n++;
+    }
+    ITEMLOG("emp: set off by car %p%s: %d other car(s) slowed for %.1f s\n", by, CarTag(by), n, g_cfg.empSlow);
+}
+static void InstallItemFx() {
+    char on[160] = "";
+    auto add = [&on](const char* w) { lstrcatA(on, on[0] ? ", " : " "); lstrcatA(on, w); };
+    if (g_cfg.smokeHide) {
+        if (PatchCall(hot::callMslTarget, reinterpret_cast<void*>(&HkMslTarget), 5) &&
+            PatchPointer(reinterpret_cast<void**>(hot::vtSmokeUpd), reinterpret_cast<void*>(&HkSmokeUpd)) &&
+            PatchPointer(reinterpret_cast<void**>(hot::vtSmokeFlUpd), reinterpret_cast<void*>(&HkSmokeUpd))) add("smoke hides");
+        else Logf("items: smoke patch FAILED\n");
+    }
+    if (g_cfg.parachuteHoming) {
+        if (PatchPointer(reinterpret_cast<void**>(hot::vtParaLaunch), reinterpret_cast<void*>(&HkParaLaunch))) add("homing parachute");
+        else Logf("items: parachute patch FAILED\n");
+    }
+    if (g_cfg.shieldTime != 1.0f || g_cfg.megaShieldTime != 1.0f) {
+        if (PatchCall(hot::callShieldOn, reinterpret_cast<void*>(&HkShieldOn), 5)) add("longer shields");
+        else Logf("items: shield time patch FAILED\n");
+    }
+    if (g_cfg.shieldZap) {
+        if (InstallCarSync()) { g_carFxOn = true; add("shield shocks"); }
+        else Logf("items: shield shock patch FAILED\n");
+    }
+    if (g_cfg.empSlow > 0.0f) {
+        if (PatchPointer(reinterpret_cast<void**>(hot::vtEmpFire), reinterpret_cast<void*>(&HkEmpFire)) &&
+            PatchPointer(reinterpret_cast<void**>(hot::vtEmpUpFire), reinterpret_cast<void*>(&HkEmpFire))) add("EMP slows");
+        else Logf("items: EMP patch FAILED\n");
+    }
+    Logf("items:%s\n", on[0] ? on : " as the game");
 }
 // Items by position (itemOdds). A crate's item is rolled (0x4C3360) from the
 // weapon data's table: 22 rows (item id +0x24, 10 chance columns from +0x28),
@@ -5834,6 +6107,7 @@ BOOL APIENTRY DllMain(HMODULE h, DWORD reason, LPVOID reserved) {
             InstallAiUnstuck();
             InstallItemOdds();
             InstallIceFix();
+            InstallItemFx();
             InstallCarShadowDepth();
             InstallPhysLog();
             InstallSteering();
