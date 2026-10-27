@@ -57,7 +57,7 @@
 
 #define MOD_NAME "Beat That! Overdrive"
 #define MOD_FILE "BTOverdrive"                   // .asi, .ini, logs, tuning file
-#define HWBT_VERSION "0.5.3-test8"
+#define HWBT_VERSION "0.5.3-test9"
 #define HWBT_BASE "HWBTFix 0.3.8"
 
 // ---------------------------------------------------------------------------
@@ -144,6 +144,7 @@ namespace hot {
     const DWORD callBlastHit   = 0x4A38F0;   // call 0x457C70 in an explosion's update (0x4A3610): each car in its reach, a hit of kind 1
                                              //   (a small push, 0x456290); here esi = the car, edi = the explosion (+0x2C centre, +0x10 reach squared)
     const DWORD fnTakeHit      = 0x457C70;
+    const DWORD musEndNoLoop   = 0x53B041;   // je (6 bytes): the music stream at its end, not set to loop - stop for good
     const DWORD vtSteerSetup   = 0x8C8F94;   // RaceCarSteering's vtable (0x8C8F3C) +0x58: its setup (0x6C6D30, thiscall): +0x74 how fast
                                              //   the wheels turn (0.96 rad/s, 0x8C8FC0), +0x78 the lock (+0x7C: 1.13 rad at most)
     const DWORD fnBlastMake    = 0x4A3950;   // set off an explosion (thiscall: the explosion object, its centre, ...)
@@ -338,6 +339,7 @@ namespace hot {
         { 0x4A1FE3,       "\xE8\x68\x19\x00\x00", 5 },
         { vtSteerSetup,   "\x30\x6D\x6C\x00", 4 },                // -> 0x6C6D30
         { 0x6C6E12,       "\xD9\x05\xC0\x8F\x8C\x00\xD9\x5E\x74", 9 },   // fld [0x8C8FC0] / fstp [esi+0x74]
+        { 0x53B03E,       "\x38\x46\x28\x0F\x84\xB5\x00\x00\x00", 9 },   // cmp [esi+0x28],al / je 0x53B0FC
         { fnTakeHit,      "\x83\xEC\x0C\x53\x8B\xD9\x80\xBB\xD4\x12\x00\x00\x00", 13 },
         { fnStuntStart,   "\x51\x53\x8B\x5C\x24\x0C\x56\x57\x8B\xF1\x33\xFF", 12 },
         { 0x4BAF1F,       "\x80\xBE\x8C\x03\x00\x00\x00", 7 },   // cmp byte [esi+0x38C],0: the roll's push and torque skipped when quiet
@@ -546,6 +548,7 @@ struct Config {
     int   soundDoppler = 2;              // Doppler: 2 = from each sound's real movement, 1 = the game's (sources standing still), 0 = off
     float soundDopplerScale = 1.0f;      //   with 2: how strong (1 = real-world)
     float soundHeadroom = 3.0f;          // sound effects this many dB quieter, against clipping when many overlap
+    int   musicLoop = 1;                 // every song starts over at its end (the menus' didn't: silence once it was over)
     int   musicStream = 1;               // music streaming fixes (the "scratched disc" repeats)
     int   musicAtGo = 1;                 // race music starts at GO, after the countdown (as on the PS2)
     int   scrapeSound = 1;               // the game's metalscrape sound while grinding walls and cars
@@ -795,6 +798,9 @@ static const char kIniText[] =
     "; the music sometimes repeated a bit of itself like a scratched disc: its stream ran dry waiting\n"
     ";   behind the game's other file reads. 1 = more buffer, its own reads, a higher-priority thread (0 = the game's)\n"
     "musicStream=1\n"
+    "; every song starts over when it ends: the menus' songs (main menu, garage...) were played once, then\n"
+    ";   silence for good (0 = as the game)\n"
+    "musicLoop=1\n"
     "; --- sound effects ---\n"
     "; EAX reverb: each track's zones set a reverb (9 presets) as you drive through them, when the sound\n"
     ";   device has EAX - a wrapper such as DSOAL (see dsound-com-redirect.reg); Windows' own has none.\n"
@@ -1007,6 +1013,7 @@ static void LoadConfig() {
         else if (!_stricmp(key, "soundDopplerScale"))  g_cfg.soundDopplerScale = (float)atof(val);
         else if (!_stricmp(key, "soundHeadroom"))      g_cfg.soundHeadroom = (float)atof(val);
         else if (!_stricmp(key, "musicStream"))        g_cfg.musicStream = n;
+        else if (!_stricmp(key, "musicLoop"))          g_cfg.musicLoop = n;
         else if (!_stricmp(key, "musicAtGo"))          g_cfg.musicAtGo = n;
         else if (!_stricmp(key, "scrapeSound"))        g_cfg.scrapeSound = n;
         else if (!_stricmp(key, "sparkStreaks"))       g_cfg.sparkStreaks = n;
@@ -4651,6 +4658,17 @@ static long __cdecl HkOvRead(void* vf, char* buf, int len, int big, int word, in
     if (r > 0) errorsInRow = 0;
     return r;
 }
+// Looping (musicLoop). At a song's end the stream's decoder (0x53AF00) seeks
+// back to its loop point only if the song was started to loop (+0x28, from the
+// player's +0x307B8 - set by the track select, a race, the attract mode); the
+// main menus' songs are started without it, so they played once and the
+// stream stopped for good. The "not looping: stop" branch (0x53B041) is
+// removed: a song played normally (mode 0) always starts over.
+static void InstallMusicLoop() {
+    if (!g_cfg.musicLoop) return;
+    static const BYTE nop6[6] = { 0x90, 0x90, 0x90, 0x90, 0x90, 0x90 };
+    Logf(PatchBytes(hot::musEndNoLoop, nop6, 6) ? "music: every song starts over at its end\n" : "music: loop patch FAILED\n");
+}
 static void InstallMusicStream() {
     if (!g_cfg.musicStream) return;
     // (the archive's own handle is opened later than this: ours is made on first use)
@@ -5187,6 +5205,7 @@ BOOL APIENTRY DllMain(HMODULE h, DWORD reason, LPVOID reserved) {
             InstallScrapeSound();
             InstallMusicAtGo();
             InstallMusicStream();
+            InstallMusicLoop();
             InstallSoundFx();
             InstallExitFix();
             InstallMenuFixes();
