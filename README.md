@@ -60,3 +60,7 @@ The output imports only KERNEL32, msvcrt, USER32 and WINMM.
 ## Credits
 
 Based on HWBTFix. The game is © Activision / Mattel; this repository contains no game files.
+
+## License
+
+GPL-3.0. See [LICENSE](LICENSE).
