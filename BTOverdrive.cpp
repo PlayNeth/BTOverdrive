@@ -57,7 +57,7 @@
 
 #define MOD_NAME "Beat That! Overdrive"
 #define MOD_FILE "BTOverdrive"                   // .asi, .ini, logs, tuning file
-#define HWBT_VERSION "0.5.3-test16"
+#define HWBT_VERSION "0.5.3-test20"
 #define HWBT_BASE "HWBTFix 0.3.8"
 
 // ---------------------------------------------------------------------------
@@ -144,8 +144,7 @@ namespace hot {
     const DWORD callBlastHit   = 0x4A38F0;   // call 0x457C70 in an explosion's update (0x4A3610): each car in its reach, a hit of kind 1
                                              //   (a small push, 0x456290); here esi = the car, edi = the explosion (+0x2C centre, +0x10 reach squared)
     const DWORD fnTakeHit      = 0x457C70;
-    const DWORD stickContact1  = 0x66E91D;   // cmp dword [esi+0x2AC],0 (7): the road-sticking pull (0x66E790) only with a wheel down
-    const DWORD stickContact2  = 0x66EAB1;   // cmp dword [esi+0x2AC],0 (7): ... and the extra fall pull (x2.5) only without
+    const DWORD callWeaponRoll = 0x4620BC;   // call 0x4C3360: a crate's item (thiscall table; position 1.., cars, roll, blue)
     const DWORD carShadowFar   = 0x603D25;   // fadd qword [0x8A4268] (3.0): the car shadow projector's far plane = 10 + 3 + 1.4
     const DWORD musEndNoLoop   = 0x53B041;   // je (6 bytes): the music stream at its end, not set to loop - stop for good
     const DWORD vtSteerSetup   = 0x8C8F94;   // RaceCarSteering's vtable (0x8C8F3C) +0x58: its setup (0x6C6D30, thiscall): +0x74 how fast
@@ -344,9 +343,8 @@ namespace hot {
         { 0x6C6E12,       "\xD9\x05\xC0\x8F\x8C\x00\xD9\x5E\x74", 9 },   // fld [0x8C8FC0] / fstp [esi+0x74]
         { 0x53B03E,       "\x38\x46\x28\x0F\x84\xB5\x00\x00\x00", 9 },   // cmp [esi+0x28],al / je 0x53B0FC
         { 0x603D1E,       "\xD9\x05\x80\x87\x93\x00\x51\xDC\x05\x68\x42\x8A\x00", 13 },   // fld [0x938780] / push ecx / fadd [0x8A4268]
-        { 0x66E91D,       "\x83\xBE\xAC\x02\x00\x00\x00\xC6\x86\xE4\x01\x00\x00\x01", 14 },
-        { 0x66E96D,       "\x0F\x84\x92\x00\x00\x00", 6 },                // je 0x66EA05 (no wheel down: no pull)
-        { 0x66EAB1,       "\x83\xBE\xAC\x02\x00\x00\x00\x75\x54", 9 },   // ... / jne 0x66EB0E
+        { 0x4620BC,       "\xE8\x9F\x12\x06\x00", 5 },            // call 0x4C3360
+        { 0x4C3360,       "\x8B\x44\x24\x04\x83\xF8\x01\x7C\x05", 9 },   // mov eax,[esp+4] / cmp eax,1 / jl
         { fnTakeHit,      "\x83\xEC\x0C\x53\x8B\xD9\x80\xBB\xD4\x12\x00\x00\x00", 13 },
         { fnStuntStart,   "\x51\x53\x8B\x5C\x24\x0C\x56\x57\x8B\xF1\x33\xFF", 12 },
         { 0x4BAF1F,       "\x80\xBE\x8C\x03\x00\x00\x00", 7 },   // cmp byte [esi+0x38C],0: the roll's push and torque skipped when quiet
@@ -504,7 +502,7 @@ struct Config {
     float hazardReach = 3.0f;            // a part hits within this many times its size (takes in the long fingers, which have no box)
     int   weaponImpact = 1;              // a weapon hit (rockets, mines, mortar, airstrike) throws the car instead of the canned roll
     float weaponPush = 40.0f;            //   a mine or bomb: away from the hit (units/s)
-    float weaponLift = 80.0f;            //   and up (units/s)
+    float weaponLift = 55.0f;            //   and up (units/s)
     float weaponForward = 35.0f;         //   a rocket or mortar: thrown along (units/s)
     float weaponForwardLift = 45.0f;     //   and up (units/s)
     float weaponForwardTumble = 6.0f;    //   flipping end over end (radians/s)
@@ -521,9 +519,7 @@ struct Config {
     int   hazardSmoke = 1;               // a burst of smoke on a car the hazard throws
     float steerRate = 2.5f;              // how fast the front wheels turn when you steer: x the game's (0.96 rad/s - over a second to full lock)
     float carShadowDepth = 1.9f;         // how far below a car's middle its shadow reaches (game: 4.4 - through to a road below)
-    int   loopStick = 1;                 // loops and waves: the pull to the road held through a wheel's brief hop off it
-    float loopStickTime = 0.25f;         //   for this long after the last wheel touched (s)
-    float loopStickDist = 2.5f;          //   while the road is this close under the car's middle (units)
+    int   itemOdds = 1;                  // what a crate gives by race position (itemsFirst/Front/Mid/Back); 0 = the game's table
     int   aiUnstuck = 1;
     float aiLoopSpeed = 50.0f;           // an AI car on a loop's wall or ceiling keeps at least this speed (units/s; 0 = off)
     int   physLog = 1;                   // (test builds) your car's physics on loops and waves to BTOverdrive_physics.csv                 // an AI car that's been driving for 6 s without getting anywhere is put back on the track
@@ -728,15 +724,6 @@ static const char kIniText[] =
     ";   through the scenery beside them. 1 = it's pulled in toward the nearest car when the scenery is\n"
     ";   in the way (0 = as the game)\n"
     "introCamClip=1\n"
-    "; --- loops and waves ---\n"
-    "; the game pulls a car to the road under it (what holds it in a loop or upside down) only while a\n"
-    ";   wheel touches it - over waves and in loops the wheels hop off for a step or two, the pull lets go,\n"
-    ";   the fall pull takes over and the car bangs back down: the jitter. 1 = the pull is held for\n"
-    ";   loopStickTime seconds after the last wheel touched, while the road is within loopStickDist of\n"
-    ";   the car's middle (0 = the game's)\n"
-    "loopStick=1\n"
-    "loopStickTime=0.25\n"
-    "loopStickDist=2.5\n"
     "; --- falling off ---\n"
     "; on every track, a race car (yours or the AI's) that falls off into the void is put back on the\n"
     ";   track where it left it, with the game's own put-back - the game's never found it a place from\n"
@@ -749,6 +736,17 @@ static const char kIniText[] =
     ";   loop's wall or ceiling (tilted over 60 degrees, on the road) keeps at least this speed (units/s;\n"
     ";   cars race at about 50-75) - 0 = as the game\n"
     "aiLoopSpeed=50\n"
+    "; --- items ---\n"
+    "; what a crate gives, by race position (as in Mario Kart: the leader gets defence, the back of the\n"
+    ";   pack the big weapons): 1st, the front (top third), the middle, the back (the last two). Each\n"
+    ";   line: item:weight, ... - the chance is the weight's share of its line. Items: rocket, mortar,\n"
+    ";   boost, icegun, mine, emp, parachute, airstrike, smoke, tesla, shield. Blue crates (upgrades)\n"
+    ";   are the game's. 0 = the game's own table\n"
+    "itemOdds=1\n"
+    "itemsFirst=smoke:30, shield:30, mine:25, rocket:15\n"
+    "itemsFront=rocket:25, mine:15, shield:15, mortar:12, parachute:10, icegun:10, boost:8, tesla:5\n"
+    "itemsMid=rocket:18, mortar:15, parachute:15, icegun:12, boost:12, tesla:10, airstrike:8, mine:5, smoke:5\n"
+    "itemsBack=tesla:22, airstrike:20, boost:18, parachute:12, mortar:10, icegun:10, emp:4\n"
     "; --- weapon hits ---\n"
     "; weapon hits throw the car instead of the game's roll on the spot. A mine, airstrike bomb or\n"
     ";   parachute bomb throws it weaponPush units/s away from the blast and weaponLift up, tumbling\n"
@@ -761,7 +759,7 @@ static const char kIniText[] =
     ";   For scale, the ghoul throws 150 out and 120 up. Needs hazardHits=1. 0 = the game's roll\n"
     "weaponImpact=1\n"
     "weaponPush=40\n"
-    "weaponLift=80\n"
+    "weaponLift=55\n"
     "weaponForward=35\n"
     "weaponForwardLift=45\n"
     "weaponForwardTumble=6\n"
@@ -956,6 +954,10 @@ static void LoadConfig() {
         char* ve = val + strlen(val);
         while (ve > val && (ve[-1] == '\r' || ve[-1] == '\n' || ve[-1] == ' ' || ve[-1] == '\t')) *--ve = 0;
         int n = atoi(val);
+        if (!_strnicmp(key, "items", 5)) {                          // itemsFirst/Front/Mid/Back = name:weight, ...
+            extern bool ItemTableParse(const char* group, const char* v);
+            if (ItemTableParse(key + 5, val)) continue;
+        }
         if (!_strnicmp(key, "hdr.", 4) && key[4] && strlen(key + 4) < 40) {   // hdr.<effect parameter>=value (absolute)
             extern void HdrOverride(const char* name, float v);
             HdrOverride(key + 4, (float)atof(val));
@@ -1091,10 +1093,8 @@ static void LoadConfig() {
         else if (!_stricmp(key, "hazardFallReset"))    g_cfg.hazardFallReset = (float)atof(val);
         else if (!_stricmp(key, "fallReset"))          g_cfg.fallReset = n;
         else if (!_stricmp(key, "aiUnstuck"))          g_cfg.aiUnstuck = n;
+        else if (!_stricmp(key, "itemOdds"))           g_cfg.itemOdds = n;
         else if (!_stricmp(key, "aiLoopSpeed"))        g_cfg.aiLoopSpeed = (float)atof(val);
-        else if (!_stricmp(key, "loopStick"))          g_cfg.loopStick = n;
-        else if (!_stricmp(key, "loopStickTime"))      g_cfg.loopStickTime = (float)atof(val);
-        else if (!_stricmp(key, "loopStickDist"))      g_cfg.loopStickDist = (float)atof(val);
         else if (!_stricmp(key, "physLog"))            g_cfg.physLog = n;
         else if (!_stricmp(key, "carShadowDepth"))     g_cfg.carShadowDepth = (float)atof(val);
         else if (!_stricmp(key, "steerRate"))          { float v = (float)atof(val); g_cfg.steerRate = v < 0.1f ? 0.1f : v > 10.0f ? 10.0f : v; }
@@ -3003,8 +3003,8 @@ static void HazardResets() {                                    // from HkKinSte
 // falls forever. So every race car's place is noted, every quarter second, while
 // it's on the track - a wheel touching (car+0x121C: the surface under it, set
 // each step by 0x456340), upright, not thrown - and a car that's been off the
-// ground for 2.5 s, falling fast, 15 units below where it left the ground, or 50
-// below anywhere a car has driven this race, is put back where it was a second
+// ground for 2.5 s, falling fast, 15 units below where it left the ground, or 3 s
+// and 50 below anywhere a car has driven this race, is put back where it was a second
 // before it left the ground (the same put-back as a thrown hazard's, from the
 // sound update: outside the physics). Timed in the car's own steps (a pause
 // doesn't count).
@@ -3015,12 +3015,14 @@ struct FallCar {
     struct { float m[16]; LONG step; bool ok; } at[8];   // where it's been, a quarter second apart
     int next;
     bool pending;                               // a put-back is due
+    float lastTo[3]; DWORD lastToMs;            // where it was last put back, when
     float to[16];
 };
 static FallCar g_fall[16];
 static float g_fallMinY = 0.0f; static bool g_fallMinOk = false;
 static DWORD g_fallLastSeen = 0;
 static LONG g_fallLogged = 0;
+static bool ResetAPAhead(const float* p, const float* fwd, float* m);
 static void FallTrack(BYTE* car) {                              // from RegCar, once per car per step
     DWORD vt = *reinterpret_cast<DWORD*>(car);
     if (vt != 0x8A0384 && vt != 0x8A0144 && vt != 0x8A3FA4) return;   // race cars only
@@ -3060,7 +3062,7 @@ static void FallTrack(BYTE* car) {                              // from RegCar, 
     }
     if (c->pending || step < c->graceStep || c->groundStep == 0) return;
     bool lost = step - c->groundStep > 150 && vy < -25.0f && y < c->groundY - 15.0f;
-    bool void_ = g_fallMinOk && y < g_fallMinY - 50.0f && vy < -10.0f;
+    bool void_ = g_fallMinOk && y < g_fallMinY - 50.0f && vy < -10.0f && step - c->groundStep > 180;   // (3 s: not a long drop)
     if (!lost && !void_) return;
     if (thrown && !void_) return;                               // (a thrown car: its own put-back first)
     // where it was a second before it left the ground (or the oldest noted)
@@ -3075,11 +3077,21 @@ static void FallTrack(BYTE* car) {                              // from RegCar, 
     }
     if (best < 0) return;                                       // (never on the ground: nothing to go back to)
     memcpy(c->to, c->at[best].m, sizeof(c->to));
+    // An AI car that falls off at the same place again (put back there within the
+    // last 45 s, the spot within 40 units) can't make that stretch - a loop it's too
+    // slow for: it goes on to the nearest reset point past it instead.
+    bool ahead = false;
+    if (vt == 0x8A0144 && c->lastToMs && now - c->lastToMs < 45000) {
+        float d[3] = { c->to[12] - c->lastTo[0], c->to[13] - c->lastTo[1], c->to[14] - c->lastTo[2] };
+        if (Dot3(d, d) < 40.0f * 40.0f) ahead = ResetAPAhead(c->to + 12, c->to + 8, c->to);
+    }
+    memcpy(c->lastTo, c->to + 12, 12); c->lastToMs = now;
     c->pending = true;
     c->graceStep = step + 120;
     if (InterlockedIncrement(&g_fallLogged) <= 30)
-        Logf("fall reset: car %p%s fell off (y %.1f, falling %.0f units/s, %.1f s off the ground): back to (%.1f %.1f %.1f)\n",
-             car, vt == 0x8A0384 ? " (you)" : "", y, -vy, (step - c->groundStep) / 60.0f, c->to[12], c->to[13], c->to[14]);
+        Logf("fall reset: car %p%s fell off (y %.1f, falling %.0f units/s, %.1f s off the ground): %s (%.1f %.1f %.1f)\n",
+             car, vt == 0x8A0384 ? " (you)" : "", y, -vy, (step - c->groundStep) / 60.0f,
+             ahead ? "fell there before - on past it to" : "back to", c->to[12], c->to[13], c->to[14]);
 }
 static void FallResets() {                                      // from the sound update, once per step
     for (FallCar& f : g_fall) {
@@ -3116,6 +3128,41 @@ struct AiStuck {
 static AiStuck g_aiStuck[16];
 static DWORD g_aiStuckLastSeen = 0;
 static LONG g_aiStuckLogged = 0;
+// The nearest reset point (type 0xB4) ahead of p along fwd - at least 40 units
+// on, within 400, facing the same way - as a put-back matrix.
+static bool ResetAPAhead(const float* p, const float* fwd, float* m) {
+    float f[3] = { fwd[0], 0.0f, fwd[2] };
+    float fl = sqrtf(Dot3(f, f));
+    if (fl < 0.01f) return false;
+    f[0] /= fl; f[2] /= fl;
+    const DWORD lists[2] = { hot::apUserList, hot::apList };
+    const BYTE* best = nullptr; float bd = 1e30f;
+    for (DWORD list : lists) {
+        BYTE* const* aps = *reinterpret_cast<BYTE* const* const*>(list);
+        int na = *reinterpret_cast<const int*>(list + 4);
+        for (int i = 0; aps && i < na && i < 4096; i++) {
+            const BYTE* ap = aps[i];
+            if (!ap || *reinterpret_cast<const short*>(ap + 0x50) != 0xB4) continue;
+            const float* q = reinterpret_cast<const float*>(ap + 0x40);
+            const float* af = reinterpret_cast<const float*>(ap + 0x30);
+            float d[3] = { q[0] - p[0], q[1] - p[1], q[2] - p[2] };
+            float along = d[0] * f[0] + d[2] * f[2], dd = Dot3(d, d);
+            float al = sqrtf(af[0] * af[0] + af[2] * af[2]);
+            if (along < 40.0f || dd > 400.0f * 400.0f || al < 0.01f || (af[0] * f[0] + af[2] * f[2]) / al < 0.3f) continue;
+            if (dd < bd) { bd = dd; best = ap; }
+        }
+    }
+    if (!best) return false;
+    const float* q = reinterpret_cast<const float*>(best + 0x40);
+    const float* af = reinterpret_cast<const float*>(best + 0x30);
+    float g[3] = { af[0], 0.0f, af[2] };
+    float gl = sqrtf(Dot3(g, g));
+    g[0] /= gl; g[2] /= gl;
+    memset(m, 0, 64);
+    m[0] = g[2]; m[2] = -g[0]; m[5] = 1.0f; m[8] = g[0]; m[10] = g[2];
+    m[12] = q[0]; m[13] = q[1] + 0.5f; m[14] = q[2]; m[15] = 1.0f;
+    return true;
+}
 static bool NearestResetAP(const float* p, const float* avoid, float* m) {
     const DWORD lists[2] = { hot::apUserList, hot::apList };
     const BYTE* best = nullptr; float bd = 1e30f;
@@ -3250,80 +3297,6 @@ static void InstallPhysLog() {
     if (!InstallCarSync()) { fclose(g_physLog); g_physLog = nullptr; return; }
     Logf("physics log: your car on loops, banks and waves to %s\n", path);
 }
-// Loops and waves (loopStick). A car is held to the road by its controller's
-// road pull (0x66E790, every step): a line test along its pull direction finds
-// the road under it, and the pull - g x mass toward that road - is applied only
-// while a wheel touches the road (+0x2AC); without, an extra fall pull (2.5 x
-// world down) instead. The physics log showed loops and waves taken with the
-// wheels on and off the road every step or two - the pull let go, the fall pull
-// took over, the car banged back: spin and speed jolting each step. So the
-// pull is kept (and the fall pull held off) for loopStickTime after a wheel last
-// touched, while the road the line test found is within loopStickDist of the
-// car's middle along its normal (0x969838 normal, 0x969848 point) - over a
-// crest or off a jump the road falls away fast, and the car flies as before.
-struct StickState { BYTE* ctl; DWORD touchMs; };
-static StickState g_stick[16];
-static BYTE* g_stickCtl = nullptr; static int g_stickVal = 0; static bool g_stickFresh = false;
-static LONG g_stickHeld = 0, g_stickAll = 0; static DWORD g_stickLogMs = 0;
-extern "C" int __cdecl StickDecide(BYTE* ctl, int first) {
-    int contact = *reinterpret_cast<const int*>(ctl + 0x2AC) != 0;
-    if (!first) {                                               // (the fall-pull check: as the pull was decided)
-        if (g_stickFresh && g_stickCtl == ctl) { g_stickFresh = false; return g_stickVal; }
-        return contact;
-    }
-    DWORD now = GetTickCount();
-    StickState* e = nullptr; StickState* slot = &g_stick[0];
-    for (StickState& x : g_stick) {
-        if (x.ctl == ctl) { e = &x; break; }
-        if (now - x.touchMs > now - slot->touchMs) slot = &x;
-    }
-    if (!e) { e = slot; e->ctl = ctl; e->touchMs = 0; }
-    int val = contact;
-    if (contact) e->touchMs = now;
-    else if (e->touchMs && now - e->touchMs < (DWORD)(g_cfg.loopStickTime * 1000.0f)) {
-        BYTE* car = *reinterpret_cast<BYTE**>(ctl + 0x58);
-        const float* p = reinterpret_cast<const float*>(car + 0x40);
-        const float* n = reinterpret_cast<const float*>(hot::lineHitGlobals + 0x20);   // 0x969838: the road's normal
-        const float* h = reinterpret_cast<const float*>(hot::lineHitGlobals + 0x30);   // 0x969848: where the line met it
-        float d[3] = { p[0] - h[0], p[1] - h[1], p[2] - h[2] };
-        float above = d[0] * n[0] + d[1] * n[1] + d[2] * n[2];
-        if (above > -1.0f && above < g_cfg.loopStickDist) { val = 1; g_stickHeld++; }
-    }
-    g_stickAll++;
-    if (now - g_stickLogMs > 30000 && g_stickHeld) {
-        g_stickLogMs = now;
-        Logf("loops: the road pull held through %ld of %ld steps without a wheel down\n", g_stickHeld, g_stickAll);
-    }
-    g_stickCtl = ctl; g_stickVal = val; g_stickFresh = true;
-    return val;
-}
-extern "C" void StickStub1(); extern "C" void StickStub2();
-asm(".text\n"
-    ".globl _StickStub1\n_StickStub1:\n"      // replaces cmp dword [esi+0x2AC],0 at 0x66E91D: ZF = no pull
-    "    pushal\n"
-    "    pushl $1\n"
-    "    pushl %esi\n"
-    "    call _StickDecide\n"
-    "    addl $8, %esp\n"
-    "    testl %eax, %eax\n"
-    "    popal\n"                                 // (popal leaves the flags)
-    "    ret\n"
-    ".globl _StickStub2\n_StickStub2:\n"      // ... at 0x66EAB1: ZF = no wheel down (the fall pull)
-    "    pushal\n"
-    "    pushl $0\n"
-    "    pushl %esi\n"
-    "    call _StickDecide\n"
-    "    addl $8, %esp\n"
-    "    testl %eax, %eax\n"
-    "    popal\n"
-    "    ret\n");
-static void InstallLoopStick() {
-    if (!g_cfg.loopStick) return;
-    bool ok = PatchCall(hot::stickContact1, reinterpret_cast<void*>(&StickStub1), 7) &&
-              PatchCall(hot::stickContact2, reinterpret_cast<void*>(&StickStub2), 7);
-    Logf(ok ? "loops: the road pull held %.2f s after a wheel lifts, within %.1f of the road\n" : "loops: patch FAILED\n",
-         g_cfg.loopStickTime, g_cfg.loopStickDist);
-}
 // AI on loops (aiLoopSpeed). The AI eases off for a big loop's climb and, too
 // slow, drops off its wall or ceiling and tries again, and again. An AI car
 // (GSAIRaceCar_c) tilted more than 60 degrees from level, with a wheel on the
@@ -3352,6 +3325,85 @@ static void AiLoopAssist(BYTE* car) {                           // from RegCar, 
     reinterpret_cast<SetVec_t>(hot::fnSetLinVel)(car, nv);
     if (InterlockedIncrement(&g_aiLoopLogged) <= 10)
         Logf("ai: car %p on a loop at %.0f units/s (tilted, up %.2f): brought up to %.0f\n", car, sp, m[5], g_cfg.aiLoopSpeed);
+}
+// Items by position (itemOdds). A crate's item is rolled (0x4C3360) from the
+// weapon data's table: 22 rows (item id +0x24, 10 chance columns from +0x28),
+// a column picked by the car count and the car's position (0x95A2F4; with 8
+// cars only 1st, 2nd-7th and last differ), blue crates columns 8-9. For a
+// normal crate the roll is made here instead, from four lines - 1st, the front
+// third, the middle, the last two - of item:weight pairs (the ini). Blue
+// crates, and a line left empty, keep the game's roll.
+struct ItemW { int id; float w; };
+static ItemW g_items[4][16];
+static int g_itemsN[4] = { 0, 0, 0, 0 };
+static bool g_itemsSet[4] = { false, false, false, false };
+static const struct { const char* name; int id; } kItemNames[] = {
+    { "rocket", 0xFA1 }, { "mortar", 0xFA2 }, { "boost", 0xFA3 }, { "icegun", 0xFA4 }, { "mine", 0xFA5 },
+    { "emp", 0xFA6 }, { "parachute", 0xFA7 }, { "airstrike", 0xFA8 }, { "smoke", 0xFA9 }, { "tesla", 0xFAA },
+    { "shield", 0xFAB } };
+static const char* ItemName(int id) {
+    for (const auto& n : kItemNames) if (n.id == id) return n.name;
+    return "?";
+}
+bool ItemTableParse(const char* group, const char* v) {
+    static const char* const groups[4] = { "First", "Front", "Mid", "Back" };
+    int g = -1;
+    for (int i = 0; i < 4; i++) if (!_stricmp(group, groups[i])) g = i;
+    if (g < 0) return false;
+    g_itemsN[g] = 0; g_itemsSet[g] = true;
+    char buf[320]; lstrcpynA(buf, v, sizeof(buf));
+    for (char* tok = strtok(buf, ","); tok && g_itemsN[g] < 16; tok = strtok(nullptr, ",")) {
+        while (*tok == ' ' || *tok == '\t') tok++;
+        char* colon = strchr(tok, ':');
+        if (!colon) continue;
+        *colon = 0;
+        char* ne = colon; while (ne > tok && (ne[-1] == ' ' || ne[-1] == '\t')) *--ne = 0;
+        float w = (float)atof(colon + 1);
+        if (w <= 0.0f) continue;
+        for (const auto& n : kItemNames)
+            if (!_stricmp(tok, n.name)) { g_items[g][g_itemsN[g]++] = { n.id, w }; break; }
+    }
+    return true;
+}
+static void ItemDefaults() {                                    // (the ini's defaults, for an ini without the lines)
+    static const char* const def[4] = {
+        "smoke:30, shield:30, mine:25, rocket:15",
+        "rocket:25, mine:15, shield:15, mortar:12, parachute:10, icegun:10, boost:8, tesla:5",
+        "rocket:18, mortar:15, parachute:15, icegun:12, boost:12, tesla:10, airstrike:8, mine:5, smoke:5",
+        "tesla:22, airstrike:20, boost:18, parachute:12, mortar:10, icegun:10, emp:4" };
+    static const char* const names[4] = { "First", "Front", "Mid", "Back" };
+    for (int g = 0; g < 4; g++) if (!g_itemsSet[g]) ItemTableParse(names[g], def[g]);
+}
+static DWORD g_itemRand = 0x6A09E667;
+static LONG g_itemLogged = 0;
+typedef int (__attribute__((thiscall)) *WeaponRoll_t)(BYTE*, int, int, float, int);
+static int __attribute__((thiscall)) HkWeaponRoll(BYTE* table, int pos, int cars, float roll, int blue) {
+    WeaponRoll_t orig = reinterpret_cast<WeaponRoll_t>(0x4C3360);
+    if (blue == 1 || cars < 1 || pos < 1) return orig(table, pos, cars, roll, blue);
+    int g;
+    if (pos == 1) g = 0;
+    else if (cars >= 4 && pos >= cars - 1) g = 3;               // (the last two)
+    else if ((pos - 1) * 3 < cars) g = 1;                       // (the front third)
+    else g = 2;
+    if (g == 3 && cars < 4) g = 2;
+    float sum = 0.0f;
+    for (int i = 0; i < g_itemsN[g]; i++) sum += g_items[g][i].w;
+    if (sum <= 0.0f) return orig(table, pos, cars, roll, blue);
+    g_itemRand = g_itemRand * 1664525u + 1013904223u;
+    float r = (g_itemRand >> 8) / 16777216.0f * sum;
+    int id = g_items[g][g_itemsN[g] - 1].id;
+    for (int i = 0; i < g_itemsN[g]; i++) { if (r < g_items[g][i].w) { id = g_items[g][i].id; break; } r -= g_items[g][i].w; }
+    if (InterlockedIncrement(&g_itemLogged) <= 40)
+        Logf("items: position %d of %d (%s) got %s\n", pos, cars, g == 0 ? "1st" : g == 1 ? "front" : g == 2 ? "middle" : "back", ItemName(id));
+    return id;
+}
+static void InstallItemOdds() {
+    if (!g_cfg.itemOdds) { Logf("items: the game's odds\n"); return; }
+    ItemDefaults();
+    g_itemRand ^= GetTickCount();
+    if (!PatchCall(hot::callWeaponRoll, reinterpret_cast<void*>(&HkWeaponRoll), 5)) { Logf("items: patch FAILED\n"); return; }
+    Logf("items: by position - 1st %d items, front %d, middle %d, back %d (blue crates: the game's)\n",
+         g_itemsN[0], g_itemsN[1], g_itemsN[2], g_itemsN[3]);
 }
 static void InstallFallReset() {
     if (!g_cfg.fallReset) { Logf("fall reset: off\n"); return; }
@@ -5673,9 +5725,9 @@ BOOL APIENTRY DllMain(HMODULE h, DWORD reason, LPVOID reserved) {
             InstallWeaponImpact();
             InstallFallReset();
             InstallAiUnstuck();
+            InstallItemOdds();
             InstallCarShadowDepth();
             InstallPhysLog();
-            InstallLoopStick();
             InstallSteering();
             InstallGrid();
             InstallStartBoost();
