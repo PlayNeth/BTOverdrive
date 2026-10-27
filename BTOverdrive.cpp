@@ -57,7 +57,7 @@
 
 #define MOD_NAME "Beat That! Overdrive"
 #define MOD_FILE "BTOverdrive"                   // .asi, .ini, logs, tuning file
-#define HWBT_VERSION "0.5.3-test24"
+#define HWBT_VERSION "0.5.3-test27"
 #define HWBT_BASE "HWBTFix 0.3.8"
 
 // ---------------------------------------------------------------------------
@@ -154,6 +154,13 @@ namespace hot {
     const DWORD vtParaLaunch   = 0x8AAEBC;   // GSAmmoParachute's (0x8AAEA4) +0x18: launch (0x4710D0, thiscall firer, ?)
     const DWORD vtEmpFire      = 0x8AAFB4;   // GSAmmoEMP's (0x8AAFAC) +0x8: set off (0x49EEA0)
     const DWORD vtEmpUpFire    = 0x8AB01C;   // GSAmmoEMPUpgrade's (0x8AB014) +0x8
+    const DWORD callFireMsgA   = 0x41E707;   // call 0x5890F0 (the game's debug print, a no-op): "WEAPON ERROR - INHIBITED BY TOONSTAT - %i"
+    const DWORD callFireMsgB   = 0x41E716;   // call 0x5890F0: no weapon / already firing / bAllowWeaponFire false (the fire button's checks, 0x41E3C0)
+    const DWORD callToonCanFire = 0x41E593;  // call 0x451370 (thiscall the car's toon state, car+0xF44): may this state fire? State 4
+                                             //   is a track's shield power-up's (GSShieldToonPower_c, 0x4DB110), which says no
+    const DWORD callToonCanFire2 = 0x46D22D; // call 0x451370: the same check on the other way an item is set off (0x46D210)
+    const DWORD callToonShowWpn[2] = { 0x42F08A, 0x42F0C4 };   // call 0x451380 (+5: may this state hold its item out) in the
+                                             //   gunner's update (0x42F070) - no: it's put away (0x42E780)
     const DWORD callWeaponRoll = 0x4620BC;   // call 0x4C3360: a crate's item (thiscall table; position 1.., cars, roll, blue)
     const DWORD carShadowFar   = 0x603D25;   // fadd qword [0x8A4268] (3.0): the car shadow projector's far plane = 10 + 3 + 1.4
     const DWORD musEndNoLoop   = 0x53B041;   // je (6 bytes): the music stream at its end, not set to loop - stop for good
@@ -475,6 +482,12 @@ namespace hot {
         { callIceFull,    "\xE8\x74\xFD\xFF\xFF", 5 },               // call 0x478E40
         { callMslTarget,  "\xE8\x22\xFC\xFF\xFF", 5 },               // call 0x473370
         { callShieldOn,   "\xE8\xC0\xA6\x00\x00", 5 },               // call 0x4A7D20
+        { callFireMsgA,   "\xE8\xE4\xA9\x16\x00", 5 },               // call 0x5890F0
+        { callFireMsgB,   "\xE8\xD5\xA9\x16\x00", 5 },
+        { callToonCanFire, "\xE8\xD8\x2D\x03\x00", 5 },              // call 0x451370
+        { callToonCanFire2, "\xE8\x3E\x41\xFE\xFF", 5 },             // call 0x451370
+        { callToonShowWpn[0], "\xE8\xF1\x22\x02\x00", 5 },           // call 0x451380
+        { callToonShowWpn[1], "\xE8\xB7\x22\x02\x00", 5 },
         { vtSmokeUpd,     "\x50\xDA\x49\x00", 4 },                   // 0x49DA50
         { vtSmokeFlUpd,   "\x50\xDA\x49\x00", 4 },
         { vtParaLaunch,   "\xD0\x10\x47\x00", 4 },                   // 0x4710D0
@@ -538,6 +551,7 @@ struct Config {
     int   hazardSmoke = 1;               // a burst of smoke on a car the hazard throws
     float steerRate = 2.5f;              // how fast the front wheels turn when you steer: x the game's (0.96 rad/s - over a second to full lock)
     float carShadowDepth = 1.9f;         // how far below a car's middle its shadow reaches (game: 4.4 - through to a road below)
+    int   shieldPowerFire = 1;           // items can be fired while a track's shield power-up is on (the game: not)
     float blueEmp = 0.3f;                // a blue crate's super EMP: only for the last two, and kept this often (else rolled again)
     int   itemOdds = 1;                  // what a crate gives by race position (itemsFirst/Front/Mid/Back); 0 = the game's table
     int   aiUnstuck = 1;
@@ -780,6 +794,9 @@ static const char kIniText[] =
     "; a blue crate's super EMP: only the last two places can get it, and only this share of the times\n"
     ";   the game's roll gives it (the rest are rolled again) - 1 = as often as the game, 0 = never\n"
     "blueEmp=0.3\n"
+    "; a track's shield power-up (Spooky Sprint's, before the ghoul's ramp...) shields the car for a while\n"
+    ";   and the game won't let it fire its item until it wears off. 1 = it can fire (0 = as the game)\n"
+    "shieldPowerFire=1\n"
     "; the ice gun: a frozen car isn't frozen again on top (each shot restarted it), a car that's just\n"
     ";   broken out is free for a second, its steering always comes back with the ice, and a frozen AI\n"
     ";   car can't steer either (it drove on as if nothing happened) - 0 = as the game\n"
@@ -1149,6 +1166,7 @@ static void LoadConfig() {
         else if (!_stricmp(key, "aiUnstuck"))          g_cfg.aiUnstuck = n;
         else if (!_stricmp(key, "itemOdds"))           g_cfg.itemOdds = n;
         else if (!_stricmp(key, "aiLoopSpeed"))        g_cfg.aiLoopSpeed = (float)atof(val);
+        else if (!_stricmp(key, "shieldPowerFire"))    g_cfg.shieldPowerFire = n;
         else if (!_stricmp(key, "blueEmp"))            g_cfg.blueEmp = (float)atof(val);
         else if (!_stricmp(key, "iceFix"))             g_cfg.iceFix = n;
         else if (!_stricmp(key, "smokeHide"))          g_cfg.smokeHide = n;
@@ -3719,6 +3737,56 @@ static void InstallItemFx() {
     }
     Logf("items:%s\n", on[0] ? on : " as the game");
 }
+// ---------------------------------------------------------------------------
+// Why the fire button did nothing (test builds). The fire button's checks
+// (0x41E3C0) print why they refused into the game's debug print (0x5890F0, a
+// no-op in the release game): no weapon, already firing, "bAllowWeaponFire"
+// false (car+0x1220), or the car's toon state (car+0xF44: [+0] its state, the
+// state table 0x954730 x 0x30, +4 can fire) holding it. Logged here, with the
+// state and where the car is, at most once a second.
+// ---------------------------------------------------------------------------
+static LONG g_fireMsgLogged = 0;
+static void FireMsg(const char* fmt, va_list ap) {
+    static DWORD lastMs = 0;
+    static char last[96] = "";
+    char buf[96];
+    _vsnprintf(buf, sizeof(buf) - 1, fmt, ap);
+    buf[sizeof(buf) - 1] = 0;
+    for (char* c = buf; *c; c++) if (*c == '\n') *c = 0;
+    DWORD now = GetTickCount();
+    if (!lstrcmpA(buf, last) && now - lastMs < 1000) return;
+    lstrcpynA(last, buf, sizeof(last)); lastMs = now;
+    if (InterlockedIncrement(&g_fireMsgLogged) > 60) return;
+    BYTE* you = nullptr;
+    for (int i = 0; i < 8 && !you; i++) { BYTE* c = RaceCarAt(i); if (c && *reinterpret_cast<DWORD*>(c) == 0x8A0384) you = c; }
+    if (!you) { Logf("fire: %s\n", buf); return; }
+    BYTE* toon = *reinterpret_cast<BYTE**>(you + 0xF44);
+    int state = toon ? *reinterpret_cast<int*>(toon) : -1;
+    const float* p = reinterpret_cast<const float*>(you + 0x40);
+    Logf("fire: %s (your car: toon state %d, no-fire flag %d, at %.1f %.1f %.1f)\n", buf, state, you[0x1220], p[0], p[1], p[2]);
+}
+extern "C" void __cdecl FireMsgHook(const char* fmt, ...) {
+    va_list ap; va_start(ap, fmt); FireMsg(fmt, ap); va_end(ap);
+}
+static bool __attribute__((thiscall)) HkToonCanFire(BYTE* toon) {   // replaces call 0x451370 at 0x41E593
+    if (*reinterpret_cast<int*>(toon) == 4) return true;       // (a shield power-up: fire anyway)
+    return reinterpret_cast<bool (__attribute__((thiscall)) *)(BYTE*)>(0x451370)(toon);
+}
+static bool __attribute__((thiscall)) HkToonShowWpn(BYTE* toon) {   // replaces the calls of 0x451380 in 0x42F070
+    if (*reinterpret_cast<int*>(toon) == 4) return true;
+    return reinterpret_cast<bool (__attribute__((thiscall)) *)(BYTE*)>(0x451380)(toon);
+}
+static void InstallFireMsgs() {
+    if (g_cfg.shieldPowerFire) {
+        if (PatchCall(hot::callToonCanFire, reinterpret_cast<void*>(&HkToonCanFire), 5) &&
+            PatchCall(hot::callToonCanFire2, reinterpret_cast<void*>(&HkToonCanFire), 5) &&
+            PatchCall(hot::callToonShowWpn[0], reinterpret_cast<void*>(&HkToonShowWpn), 5) &&
+            PatchCall(hot::callToonShowWpn[1], reinterpret_cast<void*>(&HkToonShowWpn), 5)) Logf("items: can be fired in toon state 4 (a shield power-up, or road marked with it - Spooky Sprint)\n");
+        else Logf("items: shield power-up patch FAILED\n");
+    }
+    if (!PatchCall(hot::callFireMsgA, reinterpret_cast<void*>(&FireMsgHook), 5) ||
+        !PatchCall(hot::callFireMsgB, reinterpret_cast<void*>(&FireMsgHook), 5)) Logf("fire: log patch FAILED\n");
+}
 // Items by position (itemOdds). A crate's item is rolled (0x4C3360) from the
 // weapon data's table: 22 rows (item id +0x24, 10 chance columns from +0x28),
 // a column picked by the car count and the car's position (0x95A2F4; with 8
@@ -6140,6 +6208,7 @@ BOOL APIENTRY DllMain(HMODULE h, DWORD reason, LPVOID reserved) {
             InstallItemOdds();
             InstallIceFix();
             InstallItemFx();
+            InstallFireMsgs();
             InstallCarShadowDepth();
             InstallPhysLog();
             InstallSteering();
