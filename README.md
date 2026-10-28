@@ -25,6 +25,7 @@ Beat That! Overdrive makes races harder hitting and more chaotic. It also fixes 
 - **Hot Wheels: Beat That!** for PC, with the retail `HOT.exe` (SHA-1 `0c6c388cd9a8326bfea4da56049ad58a270d4830`).
 - An **ASI loader**, such as [Ultimate ASI Loader](https://github.com/ThirteenAG/Ultimate-ASI-Loader).
 - **Optional:** [DSOAL](https://github.com/kcat/dsoal) or [reAL](https://github.com/PlayNeth/reAL), for the EAX reverb and muffled sounds behind walls. Windows' own sound system has no EAX; everything else works without it.
+  - **On Windows,** the game creates its sound through COM, so a `dsound.dll` placed in `Bin` isn't loaded on its own. Set the path in reAL's [`dsound-com-redirect.reg`](https://github.com/PlayNeth/reAL/blob/main/tools/dsound-com-redirect.reg) to that `dsound.dll` and run it; `dsound-com-redirect-undo.reg` removes it. On Wine or Proton, install the DLL into the prefix instead (reAL's `install.sh` does this).
 
 It runs on Windows, and on Linux through Wine or Proton.
 
