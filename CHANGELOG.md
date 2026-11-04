@@ -8,7 +8,7 @@ The plugin checks the exe's bytes at every place it patches. If anything differs
 
 ---
 
-## 0.5.4: no more stray put-backs, the game's handling with quicker steering
+## 0.5.4: no more stray put-backs, the game's handling with quicker steering, engine squeal fixed
 
 **Put-backs**
 - **Thrown cars:** a car thrown by a weapon or a hazard is only put back when it's clearly off the track. It has to be in the air, `hazardFallReset` below where it was hit and below every road driven this race, or still falling 5 s after the throw. Before, a car still in the air 3 s after a throw was put back as soon as it dropped 5 units below where it was hit, so a car landing on a road lower down was often put back just before it touched down.
@@ -19,6 +19,9 @@ The plugin checks the exe's bytes at every place it patches. If anything differs
 - **The game's handling is back:** the built-in tuning no longer changes the car's mass, inertia, suspension damping or springs. The lines are still in `BTOverdrive_tuning.txt`, switched off (`;`), if you want them.
 - **Quicker steering instead:** `steerRate` now defaults to `4` (was `2.5`), so the front wheels go from straight to full lock in about 0.3 s instead of over a second.
 - **Upgrading:** delete your `BTOverdrive_tuning.txt` so the mod writes the new one, and set `steerRate=4` in `BTOverdrive.ini` (an existing ini keeps its value).
+
+**Sound**
+- **Engine squeal fixed:** with `soundDoppler=2`, your own engine could suddenly go high-pitched and stay that way for a while (heard on the Super Tsunami). Its speed was measured separately from the camera's, and any step where the two moved differently gave the engine a speed toward you. That happened when the camera swung in, when the sound wasn't placed one update and was taken as standing still, or when one of them jumped. A sound that stays within 30 units of the listener for more than a second now rides with it: it gets the listener's own velocity every update, so your car's sounds have no Doppler. Passing cars keep theirs.
 
 ## 0.5.3: weapons that hit hard, items by position, polish
 
