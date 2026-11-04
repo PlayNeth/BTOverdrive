@@ -550,7 +550,7 @@ struct Config {
     float hazardSpin = 6.0f;             // and a tumble (radians/s)
     float hazardFlyTime = 3.0f;          // a thrown car goes through walls for this long (seconds; 0 = never)
     int   hazardSmoke = 1;               // a burst of smoke on a car the hazard throws
-    float steerRate = 2.5f;              // how fast the front wheels turn when you steer: x the game's (0.96 rad/s - over a second to full lock)
+    float steerRate = 4.0f;              // how fast the front wheels turn when you steer: x the game's (0.96 rad/s - over a second to full lock)
     float carShadowDepth = 1.9f;         // how far below a car's middle its shadow reaches (game: 4.4 - through to a road below)
     float soundPitchRise = 0.06f;        // a sound held on (an engine) rises in pitch at most this much per 1/60 s (0 = as the game)
     int   shieldPowerFire = 1;           // items can be fired while a track's shield power-up is on (the game: not)
@@ -763,8 +763,8 @@ static const char kIniText[] =
     "; --- handling ---\n"
     "; how fast the front wheels turn when you steer, x the game's: the game turns them at 0.96 rad/s,\n"
     ";   over a second from straight to full lock - the heavy, slow turn-in. The car's mass and inertia\n"
-    ";   (BTOverdrive_tuning.txt) hardly change that. 1 = the game's\n"
-    "steerRate=2.5\n"
+    ";   (BTOverdrive_tuning.txt) hardly change that. 4 = full lock in about 0.3 s; 1 = the game's\n"
+    "steerRate=4\n"
     "; --- intro camera ---\n"
     "; the race intro's camera sweeps past the cars on the grid; with the cars side by side it can pass\n"
     ";   through the scenery beside them. 1 = it's pulled in toward the nearest car when the scenery is\n"
@@ -5960,24 +5960,25 @@ static bool IsNumberTok(const char* s) {
 // The tuning built in: with no BTOverdrive_tuning.txt these are the numbers, and
 // the file is written with them (to edit; delete it to get these back).
 static const char kTuningText[] =
-    "; BTOverdrive_tuning.txt - a lighter car, a livelier camera, more tyre smoke.\n"
+    "; BTOverdrive_tuning.txt - a livelier camera, more tyre smoke (the car handles as in the game).\n"
     "; Lines starting with ; are off: remove the ; to try one, add it to switch one off.\n"
     ";   KEY = 2.5    KEY *= 1.3    KEY#1 *= 1.3 (2nd number after KEY)    @5F9FCF:KEY (only where that code reads it)\n"
     "; BTOverdrive_tuning.log marks every value a line here changed (-> new value).\n"
     "\n"
-    "; --- handling (the exaggerated test, brought back a bit) -------------------\n"
+    "; --- handling: the game's (quicker steering is steerRate in BTOverdrive.ini) --\n"
+    "; remove the ; to try one\n"
     "; rotational inertia: lower = snappier turn-in (stock 1500 / 1800 / 1200)\n"
-    "@5FA011:INERTIA *= 0.4\n"
-    "@5FA029:INERTIA#1 *= 0.4\n"
-    "@5FA041:INERTIA#2 *= 0.4\n"
+    ";@5FA011:INERTIA *= 0.4\n"
+    ";@5FA029:INERTIA#1 *= 0.4\n"
+    ";@5FA041:INERTIA#2 *= 0.4\n"
     "; car body mass: lower = quicker launch, lighter feel (stock 299)\n"
-    "@5F9FCF:MASS *= 0.65\n"
+    ";@5F9FCF:MASS *= 0.65\n"
     "; suspension damping: higher = the car settles instead of bouncing over waves and in\n"
     "; loops (stock 0.25 bump / 0.5 rebound; the springs are 40000)\n"
-    "@6B8820:DAMPING-RATIO *= 3.2\n"
-    "@6B8855:REBOUND-DAMPING-RATIO *= 1.6\n"
+    ";@6B8820:DAMPING-RATIO *= 3.2\n"
+    ";@6B8855:REBOUND-DAMPING-RATIO *= 1.6\n"
     "; spring stiffness: lower = the wheels follow curves and dips instead of skipping off them (stock 40000)\n"
-    "@6B87E7:SPRING-STIFFNESS *= 0.75\n"
+    ";@6B87E7:SPRING-STIFFNESS *= 0.75\n"
     "\n"
     "; --- camera ----------------------------------------------------------------\n"
     "; field of view (stock 65; the speed FOV in BTOverdrive.ini adds to it at speed)\n"

@@ -91,12 +91,11 @@ Almost everything can be switched off or adjusted in `BTOverdrive.ini`.
 
 ### Driving and camera
 
-- **Quicker, lighter steering:** the front wheels turn 2.5 times as fast.
+- **Quicker steering:** the front wheels turn 4 times as fast, from straight to full lock in about 0.3 s. The car itself handles as in the game.
 - **Built-in tuning:**
-  - a lighter car;
   - a closer, livelier camera;
-  - more tyre smoke;
-  - suspension that keeps the wheels on the road over loops and wavy roads.
+  - more tyre smoke.
+  - The old handling changes (a lighter car, stiffer suspension) are still in the tuning file, switched off.
 - **Speed effects:** the field of view widens at speed, with an optional speed blur and a slight camera shake.
 - **A harder start boost:** the timing dial runs faster.
 
