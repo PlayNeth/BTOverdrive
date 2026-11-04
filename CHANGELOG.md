@@ -8,6 +8,12 @@ The plugin checks the exe's bytes at every place it patches. If anything differs
 
 ---
 
+## 0.5.4: no more stray put-backs
+
+- **Thrown cars:** a car thrown by a weapon or a hazard is only put back when it's clearly off the track. It has to be in the air, `hazardFallReset` below where it was hit and below every road driven this race, or still falling 5 s after the throw. Before, a car still in the air 3 s after a throw was put back as soon as it dropped 5 units below where it was hit, so a car landing on a road lower down was often put back just before it touched down.
+- **Landing:** a thrown car that lands, even lower down the track, is no longer watched.
+- **Falling off:** a car that's been in the air for 2.5 s is only put back when it's also below every road driven this race, so a long jump down to a lower road isn't a fall. A car still falling fast after 5 s is put back anyway.
+
 ## 0.5.3: weapons that hit hard, items by position, polish
 
 **Weapon hits**

@@ -62,7 +62,7 @@
 
 #define MOD_NAME "Beat That! Overdrive"
 #define MOD_FILE "BTOverdrive"                   // .asi, .ini, logs, tuning file
-#define HWBT_VERSION "0.5.3"
+#define HWBT_VERSION "0.5.4"
 #define HWBT_BASE "HWBTFix 0.3.8"
 
 // ---------------------------------------------------------------------------
@@ -749,8 +749,9 @@ static const char kIniText[] =
     "; a thrown car flies through walls (the track's invisible walls too) for this many seconds,\n"
     ";   so it can be thrown off the track (0 = it bounces off them)\n"
     "hazardFlyTime=3\n"
-    "; a thrown car that falls this far (units) below where it was thrown is put back on the track,\n"
-    ";   the way the game resets a car that's stuck (0 = never)\n"
+    "; a thrown car that's still in the air this far (units) below where it was thrown, and below every\n"
+    ";   road driven this race (or still falling 5 s after the throw), is put back on the track, the way\n"
+    ";   the game resets a car that's stuck; one that lands lower down the track is left alone (0 = never)\n"
     "hazardFallReset=25\n"
     "; a burst of smoke on a car the hazard throws (1) or none (0)\n"
     "hazardSmoke=1\n"
@@ -3030,12 +3031,16 @@ static void ApplyHazardKick(BYTE* car) {
     }
 }
 // A car thrown off the track falls forever (nothing below catches it, and the
-// game's reset of a stuck car finds no reset point from down there). So when a
-// thrown car falls hazardFallReset below where it was thrown, or is still
-// falling fast 3 seconds after the throw, it's put back where it was hit, with
-// the game's own put-back (GSResetOnTrackAP_c, 0x433F90: position, stops the
-// car, camera...). That runs with the hazards' step (HkKinStep), outside the
-// car's physics sync.
+// game's reset of a stuck car finds no reset point from down there). So a
+// thrown car that's still in the air and clearly lost - hazardFallReset below
+// where it was thrown and below every road a car has driven this race, or
+// still falling fast 5 seconds after the throw - is put back where it was hit,
+// with the game's own put-back (GSResetOnTrackAP_c, 0x433F90: position, stops
+// the car, camera...). A thrown car that lands (a wheel on the ground, half a
+// second after the throw) is no longer watched: it landed lower down the track,
+// not off it. That runs with the hazards' step (HkKinStep), outside the car's
+// physics sync.
+static float g_fallMinY = 0.0f; static bool g_fallMinOk = false;   // the lowest road driven this race (FallTrack)
 static void HazardFallCheck(BYTE* car) {                        // from RegCar
     DWORD now = GetTickCount();
     for (HazardKick& k : g_kicks) {
@@ -3056,8 +3061,12 @@ static void HazardFallCheck(BYTE* car) {                        // from RegCar
         }
         if (!k.watch) continue;
         if (now - k.flying > 8000) { k.watch = false; continue; }      // landed on the track
+        bool ground = *reinterpret_cast<void**>(car + 0x121C) != nullptr;
+        if (ground && now - k.flying > 500) { k.watch = false; continue; }   // landed (lower down the track too)
         float drop = g_cfg.hazardFallReset < 10.0f ? 10.0f : g_cfg.hazardFallReset;   // (never while it's still near the track)
-        if ((y < k.m0[13] - drop && vy < -10.0f) || (now - k.flying > 3000 && vy < -30.0f && y < k.m0[13] - 5.0f)) {
+        bool belowRoads = !g_fallMinOk || y < g_fallMinY - 25.0f;     // (no road below it; unknown without fallReset)
+        if ((y < k.m0[13] - drop && vy < -10.0f && belowRoads) ||
+            (now - k.flying > 5000 && vy < -30.0f && y < k.m0[13] - drop)) {
             k.reset = true;
             Logf("hazards: thrown car %p fell %.0f units (y %.1f -> %.1f, falling %.0f units/s): back on the track\n",
                  car, k.m0[13] - y, k.m0[13], y, -vy);
@@ -3084,8 +3093,10 @@ static void HazardResets() {                                    // from HkKinSte
 // falls forever. So every race car's place is noted, every quarter second, while
 // it's on the track - a wheel touching (car+0x121C: the surface under it, set
 // each step by 0x456340), upright, not thrown - and a car that's been off the
-// ground for 2.5 s, falling fast, 15 units below where it left the ground, or 3 s
-// and 50 below anywhere a car has driven this race, is put back where it was a second
+// ground for 2.5 s, falling fast, 15 units below where it left the ground and 25
+// below anywhere a car has driven this race (a big jump down to a lower road
+// isn't a fall), or 5 s and still falling fast, or 3 s and 50 below anywhere a
+// car has driven, is put back where it was a second
 // before it left the ground (the same put-back as a thrown hazard's, from the
 // sound update: outside the physics). Timed in the car's own steps (a pause
 // doesn't count).
@@ -3100,7 +3111,6 @@ struct FallCar {
     float to[16];
 };
 static FallCar g_fall[16];
-static float g_fallMinY = 0.0f; static bool g_fallMinOk = false;
 static DWORD g_fallLastSeen = 0;
 static LONG g_fallLogged = 0;
 static bool ResetAPAhead(const float* p, const float* fwd, float* m);
@@ -3142,7 +3152,9 @@ static void FallTrack(BYTE* car) {                              // from RegCar, 
         return;
     }
     if (c->pending || step < c->graceStep || c->groundStep == 0) return;
-    bool lost = step - c->groundStep > 150 && vy < -25.0f && y < c->groundY - 15.0f;
+    bool lost = step - c->groundStep > 150 && vy < -25.0f && y < c->groundY - 15.0f &&
+                (!g_fallMinOk || y < g_fallMinY - 25.0f);           // (below every road driven: not a jump down)
+    if (step - c->groundStep > 300 && vy < -25.0f && y < c->groundY - 15.0f) lost = true;   // (5 s: nothing caught it)
     bool void_ = g_fallMinOk && y < g_fallMinY - 50.0f && vy < -10.0f && step - c->groundStep > 180;   // (3 s: not a long drop)
     if (!lost && !void_) return;
     if (thrown && !void_) return;                               // (a thrown car: its own put-back first)
