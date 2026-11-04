@@ -8,12 +8,13 @@ The plugin checks the exe's bytes at every place it patches. If anything differs
 
 ---
 
-## 0.5.4: no more stray put-backs, the game's handling with quicker steering, engine squeal fixed
+## 0.5.4: put-back fixes, the game's handling with quicker steering, engine squeal fixed
 
 **Put-backs**
 - **Thrown cars:** a car thrown by a weapon or a hazard is only put back when it's clearly off the track. It has to be in the air, `hazardFallReset` below where it was hit and below every road driven this race, or still falling 5 s after the throw. Before, a car still in the air 3 s after a throw was put back as soon as it dropped 5 units below where it was hit, so a car landing on a road lower down was often put back just before it touched down.
 - **Landing:** a thrown car that lands, even lower down the track, is no longer watched.
 - **Falling off:** a car that's been in the air for 2.5 s is only put back when it's also below every road driven this race, so a long jump down to a lower road isn't a fall. A car still falling fast after 5 s is put back anyway.
+- **A lap ahead after a put-back:** a car thrown or jumping over the finish line before falling off was put back behind the line with that lap already counted, so crossing the line again counted a second lap. A put-back now tells the game the car went back over the line, as the game itself does when you drive back across it, so the next crossing doesn't count.
 
 **Handling**
 - **The game's handling is back:** the built-in tuning no longer changes the car's mass, inertia, suspension damping or springs. The lines are still in `BTOverdrive_tuning.txt`, switched off (`;`), if you want them.

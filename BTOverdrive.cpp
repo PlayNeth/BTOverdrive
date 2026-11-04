@@ -569,7 +569,7 @@ struct Config {
     float empSlow = 3.0f;                // the EMP also slows every other car (as the tesla ray does) for this long (s; 0 = no)
     int   iceFix = 1;                    // the ice gun: no freezing a frozen car again, a moment free after breaking out, the AI frozen too
     int   fallReset = 1;                 // any race car that falls off the track into the void is put back where it left it
-    float hazardFallReset = 25.0f;       // a thrown car this far below where it was hit is put back on the track (0 = never)
+    float hazardFallReset = 25.0f;       // a thrown car still in the air this far below where it was hit (and below every road driven) is put back on the track (0 = never)
     float hazardPushTime = 0.5f;         // the throw keeps pushing for this long (seconds)
     int   hazardGateFix = 1;             // the graveyard gate's panels' collision made 3 units thick
     int   aiLeadSlowdown = 0;            // AI cars ahead of the player are slowed down (the game's rubber-banding)
@@ -2993,6 +2993,7 @@ struct HazardKick {
     BYTE* car; float dv[3]; float w[3]; volatile LONG pending; DWORD ms;
     volatile DWORD flying;                      // when it was thrown (0: not flying)
     float m0[16];                               // the car's matrix then: on the track, where it's put back
+    LONG lap0;                                  // its lap count then (LapBackOver)
     bool watch, reset;                          // watching it fall / a put-back is due
     DWORD safe;                                 // when it was put back: no new hit for a while
     float dir[2];                               // the throw's horizontal direction (x, z)
@@ -3022,7 +3023,12 @@ static void ApplyHazardKick(BYTE* car) {
         reinterpret_cast<SetVec_t>(hot::fnSetLinVel)(car, nv);
         reinterpret_cast<SetVec_t>(hot::fnSetAngVel)(car, nw);
         bool airborne = k.watch && k.flying && now - k.flying < 8000;  // hit again in the air: keep where it was
-        if (!airborne) memcpy(k.m0, car + 0x10, sizeof(k.m0));         //   first hit (on the track) for the put-back
+        if (!airborne) {                                                //   first hit (on the track) for the put-back
+            memcpy(k.m0, car + 0x10, sizeof(k.m0));
+            DWORD vt = *reinterpret_cast<const DWORD*>(car);
+            bool race = vt == 0x8A0384 || vt == 0x8A0144 || vt == 0x8A3FA4;
+            k.lap0 = race ? *reinterpret_cast<const LONG*>(car + 0xF58) : LONG_MAX;   // (race cars count laps)
+        }
         k.flying = now ? now : 1;
         if (g_cfg.hazardSmoke && !k.weapon)                             // a burst of smoke on the swatted car
             reinterpret_cast<void (__attribute__((thiscall)) *)(BYTE*)>(hot::fnCarDustBall)(car);
@@ -3074,6 +3080,24 @@ static void HazardFallCheck(BYTE* car) {                        // from RegCar
     }
 }
 alignas(16) static BYTE g_resetObj[0x88];                       // a GSResetOnTrackAP_c's fields for 0x433F90
+// Laps. Crossing the finish line forward counts a lap (0x455800, from the line's
+// trigger, 0x4AF1C0: car+0xF58 += 1); crossing it backward sets car+0xF9C, and
+// the next forward crossing then doesn't count. A put-back takes a car back to
+// where it was hit, or to where it was a second before it left the road: if it
+// was thrown or jumped over the line before it fell, that lap was counted, and
+// the put-back leaves it behind the line again without the game seeing it go
+// back over - the next crossing counted a second lap ("a lap ahead"). So a car
+// whose lap count went up since its put-back spot is marked as having crossed
+// back, as the game would mark it.
+static LONG g_lapLogged = 0;
+static void LapBackOver(BYTE* car, LONG lapThen) {
+    LONG lap = *reinterpret_cast<const LONG*>(car + 0xF58);
+    if (lap <= lapThen || car[0xF9C]) return;                   // (no lap since, or already marked)
+    car[0xF9C] = 1;
+    if (InterlockedIncrement(&g_lapLogged) <= 20)
+        Logf("laps: car %p crossed the finish line since its put-back spot (lap %ld, then %ld): "
+             "its next crossing doesn't count\n", car, lap, lapThen);
+}
 static void HazardResets() {                                    // from HkKinStep
     for (HazardKick& k : g_kicks) {
         if (!k.reset) continue;
@@ -3086,6 +3110,7 @@ static void HazardResets() {                                    // from HkKinSte
         memcpy(g_resetObj + 0x10, k.m0, sizeof(k.m0));         // +0x10: matrix (position at +0x40)
         *reinterpret_cast<BYTE**>(g_resetObj + 0x60) = k.car;  // +0x60: the car
         reinterpret_cast<void (__attribute__((thiscall)) *)(BYTE*)>(hot::fnCarReset)(g_resetObj);
+        LapBackOver(k.car, k.lap0);
     }
 }
 // Falling off (fallReset). Nothing below a track catches a car that leaves it,
@@ -3104,11 +3129,12 @@ struct FallCar {
     BYTE* car; DWORD seenMs;
     LONG steps, groundStep, graceStep;          // its steps; when last on the ground; no new put-back before
     float groundY;                              // its height then
-    struct { float m[16]; LONG step; bool ok; } at[8];   // where it's been, a quarter second apart
+    struct { float m[16]; LONG step; bool ok; LONG lap; } at[8];   // where it's been, a quarter second apart (and its lap)
     int next;
     bool pending;                               // a put-back is due
     float lastTo[3]; DWORD lastToMs;            // where it was last put back, when
     float to[16];
+    LONG toLap;                                 // its lap count at that spot (LONG_MAX: a spot ahead)
 };
 static FallCar g_fall[16];
 static DWORD g_fallLastSeen = 0;
@@ -3147,6 +3173,7 @@ static void FallTrack(BYTE* car) {                              // from RegCar, 
         if (m[5] > 0.7f && !thrown && (!c->at[last].ok || step - c->at[last].step >= 15)) {   // (upright; a quarter second on)
             memcpy(c->at[c->next].m, m, sizeof(c->at[0].m));
             c->at[c->next].step = step; c->at[c->next].ok = true;
+            c->at[c->next].lap = *reinterpret_cast<const LONG*>(car + 0xF58);
             c->next = (c->next + 1) & 7;
         }
         return;
@@ -3170,6 +3197,7 @@ static void FallTrack(BYTE* car) {                              // from RegCar, 
     }
     if (best < 0) return;                                       // (never on the ground: nothing to go back to)
     memcpy(c->to, c->at[best].m, sizeof(c->to));
+    c->toLap = c->at[best].lap;
     // An AI car that falls off at the same place again (put back there within the
     // last 45 s, the spot within 40 units) can't make that stretch - a loop it's too
     // slow for: it goes on to the nearest reset point past it instead.
@@ -3177,6 +3205,7 @@ static void FallTrack(BYTE* car) {                              // from RegCar, 
     if (vt == 0x8A0144 && c->lastToMs && now - c->lastToMs < 45000) {
         float d[3] = { c->to[12] - c->lastTo[0], c->to[13] - c->lastTo[1], c->to[14] - c->lastTo[2] };
         if (Dot3(d, d) < 40.0f * 40.0f) ahead = ResetAPAhead(c->to + 12, c->to + 8, c->to);
+        if (ahead) c->toLap = LONG_MAX;                         // (a spot further on: not behind the line)
     }
     memcpy(c->lastTo, c->to + 12, 12); c->lastToMs = now;
     c->pending = true;
@@ -3197,6 +3226,7 @@ static void FallResets() {                                      // from the soun
         memcpy(g_resetObj + 0x10, f.to, sizeof(f.to));
         *reinterpret_cast<BYTE**>(g_resetObj + 0x60) = f.car;
         reinterpret_cast<void (__attribute__((thiscall)) *)(BYTE*)>(hot::fnCarReset)(g_resetObj);
+        LapBackOver(f.car, f.toLap);
         f.groundStep = f.steps;                                 // (back on the track)
     }
 }
