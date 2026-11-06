@@ -580,7 +580,10 @@ struct Config {
     float aiTargetPlayer = 60.0f;        // % of AI shots aimed at the player, +10 per difficulty (game: 40)
     float aiStartBoost = 50.0f;          // % chance each AI car gets the start boost at GO (game: never)
     int   aiAreaWeaponLimit = 4;         // area weapons the AI holds back while this many are out (game: 2)
-    float boostMeterSpeed = 2.4f;        // the start-boost dial runs this many times as fast (1 = original)
+    float boostMeterSpeed = 2.8f;        // the start-boost dial runs this many times as fast (1 = original)
+    float startRedSlow = 3.0f;           // a press on the dial's red end: slowed for this long at GO (s; 0 = no)
+    int   startRedFrom = 165;            //   the red end: the gauge's frames (it loops 110-186; the green 127-144, the red around 174)
+    int   startRedTo = 183;
     int   rampageSpread = 1;             // Rampage: AI cars start spread over the whole track
     int   rampageFlee = 1;               // Rampage: AI cars run from the player
     float rampageSpeed = 1.0f;           //   their target speeds x this all the time
@@ -870,7 +873,12 @@ static const char kIniText[] =
     "gridStagger=3.5\n"
     "; the start-boost dial (hit the green during 3-2-1) runs this many times as fast: higher = harder\n"
     ";   (1 = original; the countdown itself keeps its timing)\n"
-    "boostMeterSpeed=2.4\n"
+    "boostMeterSpeed=2.8\n"
+    "; pressing while the needle is at the red end gets you slowed down for this many seconds at GO (0 = no)\n"
+    ";   startRedFrom/To: the red end, in the gauge's frames (it loops over 110-186; the green is 127-144)\n"
+    "startRedSlow=3\n"
+    "startRedFrom=165\n"
+    "startRedTo=183\n"
     "; --- AI opponents (game values in brackets) ---\n"
     "; slow down AI cars that get ahead of you, the game's rubber-banding (1), or let them race (0)\n"
     "aiLeadSlowdown=0\n"
@@ -1116,6 +1124,9 @@ static void LoadConfig() {
         else if (!_stricmp(key, "aiStartBoost"))       g_cfg.aiStartBoost = (float)atof(val);
         else if (!_stricmp(key, "aiAreaWeaponLimit"))  g_cfg.aiAreaWeaponLimit = n;
         else if (!_stricmp(key, "boostMeterSpeed"))    g_cfg.boostMeterSpeed = (float)atof(val);
+        else if (!_stricmp(key, "startRedSlow"))       g_cfg.startRedSlow = (float)atof(val);
+        else if (!_stricmp(key, "startRedFrom"))       g_cfg.startRedFrom = n;
+        else if (!_stricmp(key, "startRedTo"))         g_cfg.startRedTo = n;
         else if (!_stricmp(key, "rampageSpread"))      g_cfg.rampageSpread = n;
         else if (!_stricmp(key, "rampageFlee"))        g_cfg.rampageFlee = n;
         else if (!_stricmp(key, "shadowMapSize"))      g_cfg.shadowMapSize = n;
@@ -4378,8 +4389,18 @@ static DWORD Rand32() {                                         // xorshift, see
     return g_rng;
 }
 typedef void (__attribute__((thiscall)) *ObjFn_t)(BYTE*);
+static bool g_startRed = false;                                 // the start dial pressed on its red end (see "Start boost"): slowed at GO
 static void __attribute__((thiscall)) HkIntroGo(BYTE* state) {
     reinterpret_cast<ObjFn_t>(hot::fnIntroGo)(state);
+    if (g_startRed) {                                           // (the player's car: the EMP's slow - the tesla ray's - for startRedSlow s)
+        g_startRed = false;
+        for (int i = 0; i < 8; i++) {
+            BYTE* car = RaceCarAt(i);
+            if (car && *reinterpret_cast<DWORD*>(car) == 0x8A0384)
+                SlowHit(car, *reinterpret_cast<const float*>(0x8AAD84), g_cfg.startRedSlow, 0xFA6, 0);   // (as HkEmpFire does)
+        }
+    }
+    if (g_cfg.aiStartBoost <= 0.0f) return;
     int boosted = 0, ai = 0;
     for (int i = 0; i < 8; i++) {
         BYTE* racer = reinterpret_cast<BYTE* const*>(0x953C90)[i];
@@ -4400,7 +4421,7 @@ static double g_aiTarget = 40.0;
 static void InstallAI() {
     bool ok = true;
     if (!g_cfg.aiLeadSlowdown) { BYTE j = 0xEB; ok = ok && PatchBytes(hot::catchupAhead, &j, 1); }
-    if (g_cfg.aiStartBoost > 0.0f) ok = ok && PatchCall(hot::callIntroGo, reinterpret_cast<void*>(&HkIntroGo), 5);
+    if (g_cfg.aiStartBoost > 0.0f || g_cfg.startRedSlow > 0.0f) ok = ok && PatchCall(hot::callIntroGo, reinterpret_cast<void*>(&HkIntroGo), 5);
     if (g_cfg.aiWeaponCooldown > 0.0f && g_cfg.aiWeaponCooldown != 5.0f) {
         g_aiCooldown = g_cfg.aiWeaponCooldown;
         BYTE b[6] = { 0xD9, 0x05 };                             // fld dword ptr [g_aiCooldown]
@@ -4429,10 +4450,16 @@ static void InstallAI() {
 // gauge and the wheel are run boostMeterSpeed times as fast: each update they get
 // the extra time on top of the game's own step. The text, and so the countdown
 // and GO, keep their timing.
+// The gauge loops over frames 110-186, one full swing of the needle: the
+// green (127-144) is around frame 135, the needle at 100%; the red end, 0%,
+// around 174. A press there (startRedFrom-startRedTo) slows the player's car
+// for startRedSlow s at GO (HkIntroGo; the EMP's slow).
 // ---------------------------------------------------------------------------
 typedef void (__attribute__((thiscall)) *Upd321_t)(BYTE*);
 typedef bool (__attribute__((thiscall)) *PastMark_t)(BYTE*, const char*);
 static void __attribute__((thiscall)) Hk321Update(BYTE* self) {
+    bool before = self[0x494] != 0;                             // (pressed already)
+    if (!before) g_startRed = false;
     float k = g_cfg.boostMeterSpeed;
     if (k > 1.0f && !self[0x494] && *reinterpret_cast<int*>(self + 0x30) < 5) {   // no press yet, before GO
         float dt = *reinterpret_cast<const float*>(hot::frameDt);
@@ -4443,14 +4470,23 @@ static void __attribute__((thiscall)) Hk321Update(BYTE* self) {
                 *reinterpret_cast<float*>(a + 0x14) += (k - 1.0f) * dt * (a[0x23] ? 1.0f : -1.0f);
     }
     reinterpret_cast<Upd321_t>(hot::fn321Update)(self);
+    if (!before && self[0x494] && !self[0x495] && g_cfg.startRedSlow > 0.0f) {   // pressed just now, not on the green
+        int f = *reinterpret_cast<const int*>(self + 0x1B0 + 0x1C);   // (the gauge's frame, as 0x4E8669 reads it)
+        if (f >= g_cfg.startRedFrom && f <= g_cfg.startRedTo) {
+            g_startRed = true;
+            Logf("start boost: pressed on the red (frame %d): slowed for %.1f s at GO\n", f, g_cfg.startRedSlow);
+        }
+    }
 }
 static void InstallStartBoost() {
-    if (g_cfg.boostMeterSpeed <= 1.0f) return;
+    if (g_cfg.boostMeterSpeed <= 1.0f && g_cfg.startRedSlow <= 0.0f) return;
     if (!PatchPointer(reinterpret_cast<void**>(hot::vt321Update), reinterpret_cast<void*>(&Hk321Update))) {
         Logf("start boost: patch FAILED\n");
+        g_cfg.startRedSlow = 0.0f;
         return;
     }
-    Logf("start boost: meter x%.2f\n", g_cfg.boostMeterSpeed);
+    Logf("start boost: meter x%.2f, a press on the red (frames %d-%d) slowed %.1f s at GO\n",
+         g_cfg.boostMeterSpeed, g_cfg.startRedFrom, g_cfg.startRedTo, g_cfg.startRedSlow);
 }
 
 // ---------------------------------------------------------------------------

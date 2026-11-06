@@ -8,7 +8,7 @@ The plugin checks the exe's bytes at every place it patches. If anything differs
 
 ---
 
-## 0.5.5: shields fixed and smaller, the EMP later in the race
+## 0.5.5: shields fixed and smaller, the EMP later in the race, a riskier start boost
 
 **Shields**
 - **Shield time fixed:** the shield's time and size were mixed up. `shieldTime` and `megaShieldTime` made the shield bigger (1.5× and 1.75×) instead of longer, so it still ended after the game's time: 5 s for the Shield, 13 s for the Mega Shield.
@@ -19,6 +19,10 @@ The plugin checks the exe's bytes at every place it patches. If anything differs
 **EMP**
 - **Not before 30 s:** no crate gives the EMP in the first 30 s of a race (`empAfter`). The race clock starts at the end of the countdown and stops while paused. A blue crate's EMP is rolled again in that time.
 - **Higher odds:** the last two places now get the EMP 7.5% of the time from a normal crate (was about 6%). The default `itemsBack` line is now `tesla:22, airstrike:20, boost:18, parachute:12, mortar:10, icegun:10.5, emp:7.5`. An existing ini keeps its old line.
+
+**Start boost**
+- **Don't hit the red:** pressing while the dial's needle is at the red end gives you the EMP's slowdown for 3 s at GO (`startRedSlow`, the red end's frames `startRedFrom`/`startRedTo`). Pressing anywhere else off the green still does nothing.
+- **A faster swing:** the dial now runs at 2.8× the original speed (`boostMeterSpeed`, was 2.4). An existing ini keeps its value.
 
 ## 0.5.4: put-back fixes, the game's handling with quicker steering, engine squeal fixed
 
@@ -320,7 +324,8 @@ HWBTFix 0.3.8's keys, plus the mod's own:
 | `hazardSmoke` / `hazardGateFix` | `1` / `1` | Smoke on a thrown car; the gate panels' collision 3 units thick. |
 | `gridLayout` / `gridColumns` | `1` / `4` | Grid start (`0` = single file); cars side by side. |
 | `gridWidth` / `gridRowGap` / `gridStagger` | `7` / `14` / `3.5` | Lane spacing, row spacing, how far each car is behind the one before (units). |
-| `boostMeterSpeed` | `2.4` | Start-boost dial speed (`1` = original). |
+| `boostMeterSpeed` | `2.8` | Start-boost dial speed (`1` = original). |
+| `startRedSlow` / `startRedFrom` / `startRedTo` | `3` / `165` / `183` | A press on the dial's red end: slowed this long at GO (s; `0` = no); the red end's frames (the gauge loops over 110-186). |
 | `aiLeadSlowdown` | `0` | `1` = the game's slowdown of AI cars ahead of you. |
 | `aiWeaponCooldown` / `aiTargetPlayer` / `aiAreaWeaponLimit` | `2.5` / `60` / `4` | Seconds between AI shots [5]; % aimed at you [40]; area weapons out before the AI holds back [2]. |
 | `aiStartBoost` | `50` | % chance each AI car gets the start boost at GO (`0` = never, as in the game). |

@@ -97,7 +97,7 @@ Almost everything can be switched off or adjusted in `BTOverdrive.ini`.
   - more tyre smoke.
   - The old handling changes (a lighter car, stiffer suspension) are still in the tuning file, switched off.
 - **Speed effects:** the field of view widens at speed, with an optional speed blur and a slight camera shake.
-- **A harder start boost:** the timing dial runs faster.
+- **A harder start boost:** the timing dial runs faster, and pressing at the red end slows you down for 3 seconds at GO.
 
 ### Graphics
 
