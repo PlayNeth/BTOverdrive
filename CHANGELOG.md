@@ -18,6 +18,7 @@ The plugin checks the exe's bytes at every place it patches. If anything differs
 
 **EMP**
 - **Not before 30 s:** no crate gives the EMP in the first 30 s of a race (`empAfter`). The race clock starts at the end of the countdown and stops while paused. A blue crate's EMP is rolled again in that time.
+- **Longer slowdown:** the EMP slows every other car for 6 s (`empSlow`, was 3), a second longer than the game's own 5 s EMP effect. An existing ini keeps its value.
 - **Higher odds:** the last two places now get the EMP 7.5% of the time from a normal crate (was about 6%). The default `itemsBack` line is now `tesla:22, airstrike:20, boost:18, parachute:12, mortar:10, icegun:10.5, emp:7.5`. An existing ini keeps its old line.
 
 **Start boost**
@@ -366,7 +367,7 @@ HWBTFix 0.3.8's keys, plus the mod's own:
 | `itemOdds` | `1` | Items by race position (`0` = the game's table). |
 | `itemsFirst` / `itemsFront` / `itemsMid` / `itemsBack` | see the INI | `item:weight` pairs for 1st, the front third, the middle and the last two. Items: rocket, mortar, boost, icegun, mine, emp, parachute, airstrike, smoke, tesla, shield. |
 | `blueEmp` | `0.5` | A blue crate's EMP: only for the last two, kept this share of the time (else rolled again). |
-| `empSlow` | `3` | The EMP slows every other car for this long (s; `0` = no). |
+| `empSlow` | `6` | The EMP slows every other car for this long (s; `0` = no). |
 | `empAfter` | `30` | No crate gives the EMP in the race's first this many seconds (`0` = from the start). |
 | `shieldSecs` / `megaShieldSecs` | `7.5` / `7.5` | How long the Shield and the Mega Shield last (s; `0` = the game's 5 / 13). |
 | `shieldSize` / `megaShieldSize` | `1.25` / `1.4` | The shields' size × the game's. |

@@ -60,7 +60,7 @@ Almost everything can be switched off or adjusted in `BTOverdrive.ini`.
   - Cars caught in a blast's edge are thrown too, more weakly.
   - The game's canned barrel roll on the spot is gone.
 - **Items by race position**, as in Mario Kart: the leader gets defensive items, and the back of the pack gets the big weapons. The odds are set in the INI.
-- **EMP:** only 7th and 8th place can get it, at low odds, and not in the first 30 seconds of a race. It now also slows every other car down for 3 seconds.
+- **EMP:** only 7th and 8th place can get it, at low odds, and not in the first 30 seconds of a race. It now also slows every other car down for 6 seconds.
 - **Shields:**
   - The Shield and the Mega Shield both last 7.5 seconds, and are a little bigger than the game's.
   - A car that touches a shield gets a shock that slows it down.

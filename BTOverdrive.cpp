@@ -568,7 +568,7 @@ struct Config {
     float shieldSlow = 2.0f;
     float shieldTouch = 5.5f;            //   a touch: the cars' centres closer than this (and inside the shield)
     float shieldLock = 2.0f;             //   for this long
-    float empSlow = 3.0f;                // the EMP also slows every other car (as the tesla ray does) for this long (s; 0 = no)
+    float empSlow = 6.0f;                // the EMP also slows every other car (as the tesla ray does) for this long (s; 0 = no)
     float empAfter = 30.0f;              // no crate gives the EMP in the race's first this many seconds (0 = from the start)
     int   iceFix = 1;                    // the ice gun: no freezing a frozen car again, a moment free after breaking out, the AI frozen too
     int   fallReset = 1;                 // any race car that falls off the track into the void is put back where it left it
@@ -834,7 +834,7 @@ static const char kIniText[] =
     ";   about 2 wide, 4-5 long)\n"
     "shieldTouch=5.5\n"
     "; the EMP also slows every other car down (as the tesla ray does) for this many seconds (0 = no)\n"
-    "empSlow=3\n"
+    "empSlow=6\n"
     "; no crate gives the EMP in the first this many seconds of a race (0 = from the start)\n"
     "empAfter=30\n"
     "; --- weapon hits ---\n"
