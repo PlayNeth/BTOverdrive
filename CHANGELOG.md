@@ -8,6 +8,18 @@ The plugin checks the exe's bytes at every place it patches. If anything differs
 
 ---
 
+## 0.5.5: shields fixed and smaller, the EMP later in the race
+
+**Shields**
+- **Shield time fixed:** the shield's time and size were mixed up. `shieldTime` and `megaShieldTime` made the shield bigger (1.5× and 1.75×) instead of longer, so it still ended after the game's time: 5 s for the Shield, 13 s for the Mega Shield.
+- **New settings, in seconds:** `shieldSecs` and `megaShieldSecs` (both `7.5`) replace `shieldTime` and `megaShieldTime`. The Mega Shield is now shorter than the game's 13 s, but it keeps its shock and steering lock.
+- **A bit smaller:** `shieldSize` and `megaShieldSize` (`1.25` and `1.4`, times the game's) set the shield's size. It was 1.5× and 1.75× by mistake.
+- **Upgrading:** the old `shieldTime` and `megaShieldTime` lines are ignored. Delete `BTOverdrive.ini` to get the new lines, or add them yourself.
+
+**EMP**
+- **Not before 30 s:** no crate gives the EMP in the first 30 s of a race (`empAfter`). The race clock starts at the end of the countdown and stops while paused. A blue crate's EMP is rolled again in that time.
+- **Higher odds:** the last two places now get the EMP 7.5% of the time from a normal crate (was about 6%). The default `itemsBack` line is now `tesla:22, airstrike:20, boost:18, parachute:12, mortar:10, icegun:10.5, emp:7.5`. An existing ini keeps its old line.
+
 ## 0.5.4: put-back fixes, the game's handling with quicker steering, engine squeal fixed
 
 **Put-backs**
@@ -350,7 +362,9 @@ HWBTFix 0.3.8's keys, plus the mod's own:
 | `itemsFirst` / `itemsFront` / `itemsMid` / `itemsBack` | see the INI | `item:weight` pairs for 1st, the front third, the middle and the last two. Items: rocket, mortar, boost, icegun, mine, emp, parachute, airstrike, smoke, tesla, shield. |
 | `blueEmp` | `0.5` | A blue crate's EMP: only for the last two, kept this share of the time (else rolled again). |
 | `empSlow` | `3` | The EMP slows every other car for this long (s; `0` = no). |
-| `shieldTime` / `megaShieldTime` | `1.5` / `1.75` | Shield duration × the game's. |
+| `empAfter` | `30` | No crate gives the EMP in the race's first this many seconds (`0` = from the start). |
+| `shieldSecs` / `megaShieldSecs` | `7.5` / `7.5` | How long the Shield and the Mega Shield last (s; `0` = the game's 5 / 13). |
+| `shieldSize` / `megaShieldSize` | `1.25` / `1.4` | The shields' size × the game's. |
 | `shieldZap` / `shieldSlow` / `shieldLock` / `shieldTouch` | `1` / `2` / `2` / `5.5` | Touching a shield: slowed for this long (s); a Mega Shield's also can't steer this long (s); how close counts as touching (units, centre to centre). |
 | `parachuteHoming` / `smokeHide` | `1` / `1` | The plain parachute homes in; smoke hides its car from homing weapons. |
 | `iceFix` | `1` | Ice gun fixes: no refreezing, a second free after breaking out, frozen AI can't steer. |
